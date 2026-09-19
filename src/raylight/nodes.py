@@ -1427,6 +1427,37 @@ class RayKill:
         return ()
 
 
+class RayKillInit:
+    """Shut down Ray workers directly from the initializer output.
+
+    Works like RayKill but takes RAY_ACTORS_INIT instead of RAY_ACTORS, so the
+    workers can be killed without running the UNet loader first.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "ray_actors_init": ("RAY_ACTORS_INIT", {"tooltip": "Ray actors to shut down cleanly."}),
+                "kill_mode": (
+                    ["Kill Workers Only", "Kill Entire Cluster"],
+                    {
+                        "tooltip": "This terminal node function to cleanly shutdown worker or entire cluster, this is usefull if you want to switch to regular WF without restarting ComfyUI, or incase of error in Raylight",
+                    },
+                ),
+            }
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "kill_ray"
+    OUTPUT_NODE = True
+    CATEGORY = "Raylight"
+
+    def kill_ray(self, ray_actors_init, kill_mode):
+        ray_actors, _ = ray_actors_init
+        return RayKill().kill_ray(ray_actors, kill_mode)
+
+
 # Credit to : https://github.com/yolain/ComfyUI-Easy-Use
 # I copied this for packaging sake.
 class RayCleanVRAMUsed:
@@ -1845,6 +1876,7 @@ NODE_CLASS_MAPPINGS = {
     "UnifiedParallelSampler": UnifiedParallelSampler,
     "DPKSamplerAdvanced": DPKSamplerAdvanced,
     "RayKill": RayKill,
+    "RayKillInit": RayKillInit,
     "RayUNETLoader": RayUNETLoader,
     "RayLoraLoader": RayLoraLoader,
     "RayControlNetLoader": RayControlNetLoader,
@@ -1865,6 +1897,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "UnifiedParallelSampler": "Unified Parallel Sampler (Advance)",
     "DPKSamplerAdvanced": "Data Parallel KSampler (Advanced)",
     "RayKill": "Kill Ray",
+    "RayKillInit": "Kill Ray (from Init)",
     "RayUNETLoader": "Load Diffusion Model (Ray)",
     "RayLoraLoader": "Load Lora Model (Ray)",
     "RayControlNetLoader": "Load ControlNet (Ray)",
