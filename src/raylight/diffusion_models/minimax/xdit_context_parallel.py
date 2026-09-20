@@ -1,3 +1,5 @@
+import os
+
 import torch
 
 import comfy
@@ -30,7 +32,22 @@ def _split_packed_sequence(h, rope_freqs, mod_segments):
     return h[start:end], rope_freqs[:, start:end], local_segments
 
 
+# Volta and Turing have fp16 tensor cores but no bf16, so the model runs in fp32
+# and attention dominates both activation memory and step time. The attention
+# branch is safe in fp16 while the residual stays fp32, except for out_proj:
+# its output peaks at 6.63e4 against fp16's 65504, so it is scaled by a power of
+# two (exact, both projections have bias=False) and unscaled in fp32.
+_ATTN_FP16_OUT_PROJ_SCALE = 64.0
+
+
+def _attn_fp16():
+    return os.environ.get("RAYLIGHT_ATTN_FP16") == "1"
+
+
 def usp_attn_forward(self, x, rope_freqs=None, transformer_options={}):
+    fp16 = _attn_fp16() and x.dtype == torch.float32
+    if fp16:
+        x = x.to(torch.float16)
     s = x.shape[0]
     q, k, v = self.qkv_proj(x).split(self.heads * self.head_dim, dim=-1)
     v = v.view(s, self.heads, self.head_dim)
@@ -56,7 +73,11 @@ def usp_attn_forward(self, x, rope_freqs=None, transformer_options={}):
     k = k.transpose(0, 1).unsqueeze(0)
     v = v.transpose(0, 1).unsqueeze(0)
     out = xfuser_optimized_attention(q, k, v, self.heads, skip_reshape=True, transformer_options=transformer_options)
-    return self.out_proj(out.squeeze(0))
+    out = out.squeeze(0)
+    if fp16:
+        out = out.div(_ATTN_FP16_OUT_PROJ_SCALE).to(torch.float16)
+        return self.out_proj(out).to(torch.float32).mul_(_ATTN_FP16_OUT_PROJ_SCALE)
+    return self.out_proj(out)
 
 
 def usp_mlp_forward(self, x):
