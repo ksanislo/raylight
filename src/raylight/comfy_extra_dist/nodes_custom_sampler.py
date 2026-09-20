@@ -1,4 +1,5 @@
 import gc
+import logging
 import ray
 
 import torch
@@ -72,6 +73,31 @@ def _collect_grouped_results(results: list, expected_length: int, label: str):
         raise RuntimeError(f"{label} missing outputs for dp_rank {missing}")
 
     return [grouped_results[dp_rank] for dp_rank in range(expected_length)]
+
+
+def _retire_actors_after_fatal(ray_actors, exc):
+    """Kill workers whose state a failure has made unusable.
+
+    Freeing VRAM is not enough after an out of memory: aimdo is left unable to
+    allocate and the next sample raises "aimdo memory compile error" from a
+    worker that otherwise looks healthy. Killing them makes ensure_fresh_actors
+    respawn on the next run, which is the existing recovery path for a dead
+    actor.
+
+    Only for failures that indicate broken device state; an ordinary error does
+    not justify paying for a respawn.
+    """
+    blob = str(exc).lower()
+    if not any(k in blob for k in ("out of memory", "outofmemory", "aimdo", "cuda error",
+                                   "illegal memory access")):
+        return
+    for actor in ray_actors.get("workers", []):
+        try:
+            ray.kill(actor, no_restart=True)
+        except Exception:
+            pass
+    logging.warning("[Raylight] retired workers after a fatal sampling error; "
+                    "they will be respawned on the next run")
 
 
 def _clear_ray_worker_vram_after_sampling(ray_actors, force=False):
@@ -495,8 +521,9 @@ class XFuserSamplerCustomAdvanced:
         ]
         try:
             results = _gather_with_progress(futures)
-        except Exception:
+        except Exception as exc:
             _clear_ray_worker_vram_after_sampling(ray_actors, force=True)
+            _retire_actors_after_fatal(ray_actors, exc)
             raise
         _clear_ray_worker_vram_after_sampling(ray_actors)
         output, denoised_output = results[0]
@@ -575,8 +602,9 @@ class XFuserSamplerCustom:
         ]
         try:
             results = _gather_with_progress(futures)
-        except Exception:
+        except Exception as exc:
             _clear_ray_worker_vram_after_sampling(ray_actors, force=True)
+            _retire_actors_after_fatal(ray_actors, exc)
             raise
         _clear_ray_worker_vram_after_sampling(ray_actors)
         out = results[0]
@@ -638,8 +666,9 @@ class UnifiedParallelSamplerCustomAdvanced:
         ]
         try:
             results = _gather_with_progress(futures)
-        except Exception:
+        except Exception as exc:
             _clear_ray_worker_vram_after_sampling(ray_actors, force=True)
+            _retire_actors_after_fatal(ray_actors, exc)
             raise
         _clear_ray_worker_vram_after_sampling(ray_actors)
         results = _collect_grouped_results(results, dp_degree, "Unified Parallel SamplerCustomAdvanced")
@@ -729,8 +758,9 @@ class UnifiedParallelSamplerCustom:
         ]
         try:
             results = _gather_with_progress(futures)
-        except Exception:
+        except Exception as exc:
             _clear_ray_worker_vram_after_sampling(ray_actors, force=True)
+            _retire_actors_after_fatal(ray_actors, exc)
             raise
         _clear_ray_worker_vram_after_sampling(ray_actors)
         out = _collect_grouped_results(results, dp_degree, "Unified Parallel SamplerCustom")
@@ -788,8 +818,9 @@ class DPSamplerCustomAdvanced:
         ]
         try:
             results = _gather_with_progress(futures)
-        except Exception:
+        except Exception as exc:
             _clear_ray_worker_vram_after_sampling(ray_actors, force=True)
+            _retire_actors_after_fatal(ray_actors, exc)
             raise
         _clear_ray_worker_vram_after_sampling(ray_actors)
         outputs, denoised_outputs = _split_advanced_results(results)
@@ -882,8 +913,9 @@ class DPSamplerCustom:
         ]
         try:
             out = _gather_with_progress(futures)
-        except Exception:
+        except Exception as exc:
             _clear_ray_worker_vram_after_sampling(ray_actors, force=True)
+            _retire_actors_after_fatal(ray_actors, exc)
             raise
         _clear_ray_worker_vram_after_sampling(ray_actors)
         return (out, ray_actors)
