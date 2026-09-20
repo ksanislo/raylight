@@ -72,6 +72,17 @@ def patch_enable_comfy_kitchen_fsdp(fn):
     def wrapper(self, *args, **kwargs):
         from raylight.comfy_dist.kitchen_distributed import patch_enable_comfy_kitchen_fsdp as patcher
 
+        if os.environ.get("RAYLIGHT_FSDP_PROBE") == "1":
+            from raylight.comfy_dist import fsdp_probe
+
+            # Idempotent: patch_fsdp installs it too, but that path does not run
+            # when sharding is off and the probes are wanted for that comparison.
+            fsdp_probe.install()
+            fsdp_probe.reset()
+            try:
+                return patcher(fn)(self, *args, **kwargs)
+            finally:
+                fsdp_probe.report(self.local_rank, "sample")
         return patcher(fn)(self, *args, **kwargs)
 
     return wrapper
