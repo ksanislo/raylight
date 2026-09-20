@@ -243,6 +243,7 @@ def _build_local_runtime_env(module_dir: Path, repo_root: Path, runtime_workdir:
 # server-wide setting still works, and RayWorkerOptions can override any of them per
 # workflow without a restart.
 _WORKER_ENV_KNOBS = (
+    "RAYLIGHT_NUMA_BIND",
     "RAYLIGHT_ATTN_FP16",
     "RAYLIGHT_MLP_FP16",
     "RAYLIGHT_FP32_RESIDUAL",
@@ -2084,6 +2085,13 @@ class RayWorkerOptions:
     def INPUT_TYPES(s):
         return {
             "required": {
+                "numa_bind": (
+                    s.TRI,
+                    {"display_name": "NUMA: bind worker to its GPU's node",
+                     "default": "auto",
+                     "tooltip": "Pin each worker's CPUs and memory to the NUMA node its GPU hangs off. Worth it when GPUs span sockets. `auto` keeps the server setting (RAYLIGHT_NUMA_BIND).",
+                     },
+                ),
                 "attention_fp16": (
                     s.TRI,
                     {"display_name": "MiniMax H3: fp16 attention",
@@ -2123,12 +2131,13 @@ class RayWorkerOptions:
     FUNCTION = "build"
     CATEGORY = "Raylight"
 
-    def build(self, attention_fp16, mlp_fp16, fp32_residual, mlp_chunk_tokens):
+    def build(self, numa_bind, attention_fp16, mlp_fp16, fp32_residual, mlp_chunk_tokens):
         def flag(value):
             # auto leaves the host environment untouched
             return None if value == "auto" else ("1" if value == "on" else "0")
 
         options = {
+            "RAYLIGHT_NUMA_BIND": flag(numa_bind),
             "RAYLIGHT_ATTN_FP16": flag(attention_fp16),
             "RAYLIGHT_MLP_FP16": flag(mlp_fp16),
             "RAYLIGHT_FP32_RESIDUAL": flag(fp32_residual),
@@ -2136,6 +2145,7 @@ class RayWorkerOptions:
         if mlp_chunk_tokens >= 0:
             options["RAYLIGHT_MLP_CHUNK_TOKENS"] = str(mlp_chunk_tokens)
         return ({k: v for k, v in options.items() if v is not None},)
+
 
 NODE_CLASS_MAPPINGS = {
     "RayWorkerOptions": RayWorkerOptions,
