@@ -162,6 +162,10 @@ def _build_local_runtime_env(module_dir: Path, repo_root: Path, runtime_workdir:
     mlp_chunk = os.environ.get("RAYLIGHT_MLP_CHUNK_TOKENS")
     if mlp_chunk is not None:
         env_vars["RAYLIGHT_MLP_CHUNK_TOKENS"] = mlp_chunk
+    for _name in ("RAYLIGHT_MLP_FP16", "RAYLIGHT_FP32_RESIDUAL"):
+        _val = os.environ.get(_name)
+        if _val is not None:
+            env_vars[_name] = _val
     attn_fp16 = os.environ.get("RAYLIGHT_ATTN_FP16")
     if attn_fp16 is not None:
         env_vars["RAYLIGHT_ATTN_FP16"] = attn_fp16
@@ -185,7 +189,7 @@ def _worker_cli_args_env_json() -> str:
         "mmap_torch_files": bool(comfy_args.mmap_torch_files),
         "disable_smart_memory": bool(comfy_args.disable_smart_memory),
         "disable_async_offload": bool(comfy_args.disable_async_offload),
-        "disable_dynamic_vram": bool(comfy_args.disable_dynamic_vram),
+        "disable_dynamic_vram": bool(comfy_args.disable_dynamic_vram) or os.environ.get("RAYLIGHT_WORKER_NO_AIMDO") == "1",
         "enable_dynamic_vram": bool(comfy_args.enable_dynamic_vram),
         "vram_headroom": comfy_args.vram_headroom,
         "force_non_blocking": bool(comfy_args.force_non_blocking),

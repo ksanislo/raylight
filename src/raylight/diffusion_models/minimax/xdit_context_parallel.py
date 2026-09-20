@@ -3,7 +3,8 @@ import os
 import torch
 
 import comfy
-from comfy.ldm.minimax.model import AUDIO_COND_TIMESTEP, VISUAL_COND_TIMESTEP, PackedLayout, mask_row_values, pack_audio, patchify_video, rope_rotation_table, time_shift_sigma, unpack_audio, unpatchify_video
+
+from comfy.ldm.minimax.model import _mod_gate, _mod_scale_shift, AUDIO_COND_TIMESTEP, VISUAL_COND_TIMESTEP, PackedLayout, mask_row_values, pack_audio, patchify_video, rope_rotation_table, time_shift_sigma, unpack_audio, unpatchify_video
 from xfuser.core.distributed import get_sequence_parallel_rank, get_sequence_parallel_world_size, get_sp_group
 
 import raylight.distributed_modules.attention as xfuser_attn
@@ -95,21 +96,61 @@ def _mlp_chunk_tokens():
         return 0
 
 
+# fc2's output overflows fp16 by ~56x (measured peak 3.69e6 against 65504), so
+# its input is scaled by a power of two before the projection and unscaled in
+# fp32 afterwards. The swiglu itself is evaluated in fp32: it is pointwise and
+# not exactly representable, and it is cheap relative to the projections.
+_MLP_FP16_FC2_SCALE = 256.0
+
+
+def _mlp_fp16():
+    return os.environ.get("RAYLIGHT_MLP_FP16") == "1"
+
+
+def _mlp_branch(self, x, fp16):
+    gate, up = self.fc1(x).chunk(2, dim=-1)
+    if not fp16:
+        return self.fc2(torch.nn.functional.silu(gate).mul_(up))
+    s = torch.nn.functional.silu(gate.to(torch.float32)).mul_(up.to(torch.float32))
+    s = s.div_(_MLP_FP16_FC2_SCALE).to(torch.float16)
+    return self.fc2(s).to(torch.float32).mul_(_MLP_FP16_FC2_SCALE)
+
+
+def usp_block_forward(self, x, t_emb, mod_segments, rope_freqs, transformer_options={}, attention=None):
+    """DiT block that accumulates the residual in fp32 while the branches run in fp16.
+
+    Loading the model in fp16 halves every activation, but the residual stream
+    reaches ~1e7 across the 50 blocks, far past fp16's 65504. The branch outputs
+    arrive already unscaled from usp_attn_forward and usp_mlp_forward.
+    """
+    attention = self.attn if attention is None else attention
+    if x.dtype is not torch.float32:
+        x = x.to(torch.float32)
+    sh_a, sc_a, g_a, sh_m, sc_m, g_m = self.adaln_proj(t_emb)
+    h = _mod_scale_shift(self.norm1(x), sh_a, sc_a, mod_segments)
+    att = attention(h, rope_freqs=rope_freqs, transformer_options=transformer_options)
+    x = _mod_gate(x, g_a, att.to(torch.float32), mod_segments)
+    h = _mod_scale_shift(self.norm2(x), sh_m, sc_m, mod_segments)
+    m = self.mlp(h)
+    return _mod_gate(x, g_m, m.to(torch.float32), mod_segments)
+
+
 def usp_mlp_forward(self, x):
     # x is the packed sequence, [tokens, hidden]. Running it whole materializes
     # fc1's 2*ffn-wide output and the silu product across every token at once,
     # which dominates activation memory on long sequences. Slicing the token
     # dimension bounds both to the chunk while leaving the result identical.
     chunk = _mlp_chunk_tokens()
+    fp16 = _mlp_fp16()
+    if fp16 and x.dtype is torch.float32:
+        x = x.to(torch.float16)
     if chunk <= 0 or x.shape[0] <= chunk:
-        gate, up = self.fc1(x).chunk(2, dim=-1)
-        return self.fc2(torch.nn.functional.silu(gate).mul_(up))
+        return _mlp_branch(self, x, fp16)
 
     out = None
     for start in range(0, x.shape[0], chunk):
         stop = start + chunk
-        gate, up = self.fc1(x[start:stop]).chunk(2, dim=-1)
-        piece = self.fc2(torch.nn.functional.silu(gate).mul_(up))
+        piece = _mlp_branch(self, x[start:stop], fp16)
         if out is None:
             out = x.new_empty((x.shape[0], piece.shape[-1]), dtype=piece.dtype)
         out[start:stop] = piece
@@ -125,6 +166,7 @@ def usp_dit_forward(self, x, timestep, context, transformer_options={}, minimax_
     payload = minimax_payload or {}
     device = video_x.device
     dtype = context.dtype  # compute dtype
+
 
     latent_t, lat_h, lat_w = video_x.shape[2], video_x.shape[3], video_x.shape[4]
     audio_t = audio_x.shape[-1]
@@ -216,12 +258,12 @@ def usp_dit_forward(self, x, timestep, context, transformer_options={}, minimax_
 
     all_video_rows = video_rows
     if cond_video_rows is not None:
-        all_video_rows = torch.empty(img_update.shape[0], video_rows.shape[1], dtype=torch.float32, device=device)
+        all_video_rows = torch.zeros(img_update.shape[0], video_rows.shape[1], dtype=torch.float32, device=device)
         all_video_rows[~img_update] = cond_video_rows
         all_video_rows[img_update] = video_rows
     all_audio_rows = audio_rows
     if cond_audio_rows is not None:
-        all_audio_rows = torch.empty(audio_update.shape[0], audio_rows.shape[1], dtype=torch.float32, device=device)
+        all_audio_rows = torch.zeros(audio_update.shape[0], audio_rows.shape[1], dtype=torch.float32, device=device)
         all_audio_rows[~audio_update] = cond_audio_rows
         all_audio_rows[audio_update] = audio_rows
 
@@ -229,11 +271,19 @@ def usp_dit_forward(self, x, timestep, context, transformer_options={}, minimax_
     audio_embed = self.audio_patch_proj(all_audio_rows).to(dtype)
     text_states = context[0]
     if text_states.shape[-1] != self.hidden_size:
-        text_states = self.token_refiner(self.condition_proj(text_states),
-                                         transformer_options=transformer_options)
+        # The refiner and condition_proj are unquantized, so on a card without
+        # bf16 they are held in fp32 for the whole render while only being used
+        # here. Keep them in fp16 and convert at the boundary.
+        # condition_proj sees Qwen3-VL hidden states that project to ~96k, past
+        # fp16's range, so it runs in fp32 regardless of the model dtype.
+        text_states = self.token_refiner(self.condition_proj(text_states.to(torch.float32)),
+                                         transformer_options=transformer_options).to(dtype)
 
     # segments are contiguous: assemble by slices, embed rows follow segment order
-    h = torch.empty(layout.seq_len, self.hidden_size, dtype=dtype, device=device)
+    # zeros, not empty: the segment loop below does not necessarily cover every
+    # row (the sequence is padded to the world size), and an uninitialised row
+    # is far more likely to hold a NaN bit pattern in fp16 than in fp32.
+    h = torch.zeros(layout.seq_len, self.hidden_size, dtype=dtype, device=device)
     voff = aoff = 0
     for a, b, kind in layout.segments:
         n = b - a
