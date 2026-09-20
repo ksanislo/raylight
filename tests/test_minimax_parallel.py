@@ -114,12 +114,16 @@ def test_minimax_usp_attention_matches_core_kernels():
 
 
 def test_minimax_lora_mlp_uses_module_forward():
-    function = _function(RAYLIGHT, "usp_mlp_forward")
-    calls = {_call_name(node) for node in ast.walk(function) if isinstance(node, ast.Call)}
+    # the projections live in _mlp_branch, which usp_mlp_forward calls once per token chunk
+    branch = _function(RAYLIGHT, "_mlp_branch")
+    calls = {_call_name(node) for node in ast.walk(branch) if isinstance(node, ast.Call)}
 
     assert "self.fc1" in calls
     assert "torch.nn.functional.silu" in calls
     assert "self.fc2" in calls
+
+    function = _function(RAYLIGHT, "usp_mlp_forward")
+    assert "_mlp_branch" in {_call_name(node) for node in ast.walk(function) if isinstance(node, ast.Call)}
 
 
 def test_minimax_usp_routes_sidecar_fc2_lora():
