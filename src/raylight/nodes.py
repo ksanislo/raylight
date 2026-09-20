@@ -162,7 +162,7 @@ def _build_local_runtime_env(module_dir: Path, repo_root: Path, runtime_workdir:
     mlp_chunk = os.environ.get("RAYLIGHT_MLP_CHUNK_TOKENS")
     if mlp_chunk is not None:
         env_vars["RAYLIGHT_MLP_CHUNK_TOKENS"] = mlp_chunk
-    for _name in ("RAYLIGHT_MLP_FP16", "RAYLIGHT_FP32_RESIDUAL"):
+    for _name in ("RAYLIGHT_MLP_FP16", "RAYLIGHT_FP32_RESIDUAL", "RAYLIGHT_LORA_BYPASS"):
         _val = os.environ.get(_name)
         if _val is not None:
             env_vars[_name] = _val
