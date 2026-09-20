@@ -143,6 +143,9 @@ def _build_local_runtime_env(module_dir: Path, repo_root: Path, runtime_workdir:
         "PYTHONPATH": python_path,
         "COMFYUI_BASE_DIRECTORY": str(repo_root),
     }
+    mlp_chunk = os.environ.get("RAYLIGHT_MLP_CHUNK_TOKENS")
+    if mlp_chunk is not None:
+        env_vars["RAYLIGHT_MLP_CHUNK_TOKENS"] = mlp_chunk
     alloc_conf = _sanitized_worker_alloc_conf()
     if alloc_conf is not None:
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = alloc_conf
