@@ -1,3 +1,5 @@
+import os
+
 import torch
 
 import comfy
@@ -59,9 +61,36 @@ def usp_attn_forward(self, x, rope_freqs=None, transformer_options={}):
     return self.out_proj(out.squeeze(0))
 
 
+# Off by default so output stays byte-identical to the single-pass path.
+# Recommended value when activation memory is the constraint: 4096, which on a
+# 16 GiB card freed 2.7 GiB for 1 second of wall clock on a 124 frame render.
+# Enabling it changes which sample a seed produces (see the commit message).
+def _mlp_chunk_tokens():
+    try:
+        return int(os.environ.get("RAYLIGHT_MLP_CHUNK_TOKENS", "0"))
+    except ValueError:
+        return 0
+
+
 def usp_mlp_forward(self, x):
-    gate, up = self.fc1(x).chunk(2, dim=-1)
-    return self.fc2(torch.nn.functional.silu(gate).mul_(up))
+    # x is the packed sequence, [tokens, hidden]. Running it whole materializes
+    # fc1's 2*ffn-wide output and the silu product across every token at once,
+    # which dominates activation memory on long sequences. Slicing the token
+    # dimension bounds both to the chunk while leaving the result identical.
+    chunk = _mlp_chunk_tokens()
+    if chunk <= 0 or x.shape[0] <= chunk:
+        gate, up = self.fc1(x).chunk(2, dim=-1)
+        return self.fc2(torch.nn.functional.silu(gate).mul_(up))
+
+    out = None
+    for start in range(0, x.shape[0], chunk):
+        stop = start + chunk
+        gate, up = self.fc1(x[start:stop]).chunk(2, dim=-1)
+        piece = self.fc2(torch.nn.functional.silu(gate).mul_(up))
+        if out is None:
+            out = x.new_empty((x.shape[0], piece.shape[-1]), dtype=piece.dtype)
+        out[start:stop] = piece
+    return out
 
 
 def usp_dit_forward(self, x, timestep, context, transformer_options={}, minimax_payload=None, denoise_mask=None, audio_denoise_mask=None, **kwargs):
