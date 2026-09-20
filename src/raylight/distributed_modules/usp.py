@@ -419,9 +419,14 @@ if hasattr(model_base, "MiniMaxH3"):
             for attention in block.attn.modules():
                 if isinstance(attention, ComfyAttention) and attention.function is not None:
                     raise ValueError("Checkpoint-selected MiniMax H3 attention is not supported by Raylight USP")
+        import os as _os
+
+        # Chunking lives in usp_mlp_forward, so the wrapper has to be installed for
+        # every block when it is on, not only for the blocks a LoRA sidecar covers.
+        mlp_chunked = _os.environ.get("RAYLIGHT_MLP_CHUNK_TOKENS", "0") not in ("0", "")
         for i, block in enumerate(model.blocks):
             block.attn.forward = types.MethodType(usp_attn_forward, block.attn)
-            if f"diffusion_model.blocks.{i}.mlp.fc2" in sidecar_groups:
+            if mlp_chunked or f"diffusion_model.blocks.{i}.mlp.fc2" in sidecar_groups:
                 block.mlp.forward = types.MethodType(usp_mlp_forward, block.mlp)
         for i, block in enumerate(model.token_refiner.blocks):
             if f"diffusion_model.token_refiner.blocks.{i}.mlp.fc2" in sidecar_groups:
