@@ -2,6 +2,7 @@ import raylight
 import os
 import gc
 import json
+import logging
 import shutil
 import tempfile
 from typing import Any
@@ -154,7 +155,28 @@ def _build_local_runtime_env(module_dir: Path, repo_root: Path, runtime_workdir:
     }
 
 
-def _worker_cli_args_env_json() -> str:
+def _worker_float_override(name, fallback):
+    """Let a worker take a different value than the host for a vram knob.
+
+    The host keeps the text encoder and VAE on its own card, so the budgets that
+    suit it are not the ones that suit a worker holding only the diffusion
+    model.
+    """
+    override = os.environ.get(name)
+    if override is None:
+        return fallback
+    try:
+        return float(override)
+    except ValueError:
+        logging.warning("[Raylight] %s=%r is not a number, ignoring", name, override)
+        return fallback
+
+
+def _worker_reserve_vram():
+    return _worker_float_override("RAYLIGHT_WORKER_RESERVE_VRAM", comfy_args.reserve_vram)
+
+
+def _worker_cli_args_env_json(overrides: dict[str, Any] | None = None) -> str:
     worker_cli_args = {
         # Ray workers hit cudaHostRegister failures on large LTXV loads often enough
         # that we disable pinned memory there by default.
@@ -165,22 +187,29 @@ def _worker_cli_args_env_json() -> str:
         "disable_async_offload": bool(comfy_args.disable_async_offload),
         "disable_dynamic_vram": bool(comfy_args.disable_dynamic_vram),
         "enable_dynamic_vram": bool(comfy_args.enable_dynamic_vram),
-        "vram_headroom": comfy_args.vram_headroom,
+        "vram_headroom": _worker_float_override("RAYLIGHT_WORKER_VRAM_HEADROOM",
+                                               comfy_args.vram_headroom),
         "force_non_blocking": bool(comfy_args.force_non_blocking),
         "deterministic": bool(comfy_args.deterministic),
         "verbose": comfy_args.verbose,
-        "reserve_vram": comfy_args.reserve_vram,
+        "reserve_vram": _worker_reserve_vram(),
         "fp16_intermediates": bool(comfy_args.fp16_intermediates),
         "force_channels_last": bool(comfy_args.force_channels_last),
         "supports_fp8_compute": bool(comfy_args.supports_fp8_compute),
         "enable_triton_backend": bool(comfy_args.enable_triton_backend),
         "fast": sorted(feature.value for feature in comfy_args.fast),
     }
+    # A workflow may set these per run. They are baked into the ray runtime_env,
+    # so a change only reaches the workers when the actors are respawned, which
+    # happens because these arrive as node inputs: comfy re-executes the
+    # initializer when its inputs change and the initializer restarts ray.
+    if overrides:
+        worker_cli_args.update({k: v for k, v in overrides.items() if v is not None})
     return json.dumps(worker_cli_args, sort_keys=True)
 
 
-def _inject_worker_cli_args(runtime_env: dict[str, Any]):
-    runtime_env.setdefault("env_vars", {})["RAYLIGHT_COMFY_CLI_ARGS_JSON"] = _worker_cli_args_env_json()
+def _inject_worker_cli_args(runtime_env: dict[str, Any], overrides: dict[str, Any] | None = None):
+    runtime_env.setdefault("env_vars", {})["RAYLIGHT_COMFY_CLI_ARGS_JSON"] = _worker_cli_args_env_json(overrides)
 
 
 def _parse_gpu_select(gpu_select: str | None) -> tuple[int, ...] | None:
@@ -481,6 +510,8 @@ class RayInitializer:
         ray_object_store_gb: float = 2.0,
         ray_dashboard_address: str = "None",
         torch_dist_address: str = "None",
+        worker_vram_headroom: float = -1.0,
+        worker_reserve_vram: float = -1.0,
     ):
         # THIS IS PYTORCH DIST ADDRESS
         # (TODO) Change so it can be use in cluster of nodes. but it is long waaaaay down in the priority list
@@ -594,7 +625,17 @@ class RayInitializer:
             # Adapted from avtc's Ray GPU visibility restriction idea.
             runtime_env_base.setdefault("env_vars", {})["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_idx) for gpu_idx in selected_gpus)
 
-        _inject_worker_cli_args(runtime_env_base)
+        # -1 keeps whatever the host was started with. The host holds the text
+        # encoder and VAE, so the budgets that suit it are not the ones that
+        # suit a worker holding only the diffusion model.
+        worker_overrides = {}
+        if worker_vram_headroom >= 0:
+            worker_overrides["vram_headroom"] = float(worker_vram_headroom)
+        if worker_reserve_vram >= 0:
+            worker_overrides["reserve_vram"] = float(worker_reserve_vram)
+        if worker_overrides:
+            logging.info("[Raylight] worker vram overrides: %s", worker_overrides)
+        _inject_worker_cli_args(runtime_env_base, worker_overrides)
 
         if ray_cluster_address in _LOCAL_CLUSTER_ADDRESSES:
             _configure_raylight_ray_tmpdir(runtime_env_base)
@@ -751,6 +792,26 @@ class RayInitializerAdvanced(RayInitializer):
                     {
                         "default": "127.0.0.1:29500",
                         "tooltip": "Torch distributed master address used by worker-side NCCL init. Restart ComfyUI if you change it.",
+                    },
+                ),
+                "worker_vram_headroom": (
+                    "FLOAT",
+                    {
+                        "default": -1.0,
+                        "min": -1.0,
+                        "max": 64.0,
+                        "step": 0.5,
+                        "tooltip": "GB of VRAM each worker keeps free, overriding the server's --vram-headroom. Higher evicts more weights to host and leaves room for activations, at the cost of streaming them back each step. -1 keeps the server setting.",
+                    },
+                ),
+                "worker_reserve_vram": (
+                    "FLOAT",
+                    {
+                        "default": -1.0,
+                        "min": -1.0,
+                        "max": 64.0,
+                        "step": 0.5,
+                        "tooltip": "GB each worker reserves, overriding the server's --reserve-vram. This is what decides how much of a sharded model gets pulled back onto the card, so raising it keeps FSDP shards on the host. -1 keeps the server setting.",
                     },
                 ),
             },
