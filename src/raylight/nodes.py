@@ -725,13 +725,6 @@ class RayInitializerAdvanced(RayInitializer):
                         "tooltip": "Ring attention degree. Usually leave at 1 unless you are intentionally testing ring parallelism.",
                     },
                 ),
-                "clear_vram_after_sampling": (
-                    "BOOLEAN",
-                    {
-                        "default": False,
-                        "tooltip": "Release Ray worker VRAM after sampling so regular Comfy nodes can use the GPU.",
-                    },
-                ),
                 "cfg_degree": (
                     "INT",
                     {"default": 1, "tooltip": "CFG parallel degree. `2` splits conditional and unconditional passes across GPUs."},
@@ -756,22 +749,29 @@ class RayInitializerAdvanced(RayInitializer):
                     "BOOLEAN",
                     {"default": False, "tooltip": "When FSDP is on, offload inactive model shards to CPU RAM."},
                 ),
-                "XFuser_attention": (
-                    [member.name for member in AttnType],
-                    {"default": "TORCH_FLASH", "tooltip": "Attention backend used by xFuser-enabled execution."},
-                ),
-                "skip_comm_test": (
+                "clear_vram_after_sampling": (
                     "BOOLEAN",
                     {
                         "default": False,
-                        "tooltip": "Skip the startup NCCL communication test. Faster startup, but distributed issues are caught later.",
+                        "tooltip": "Release Ray worker VRAM after sampling so regular Comfy nodes can use the GPU.",
                     },
+                ),
+                "XFuser_attention": (
+                    [member.name for member in AttnType],
+                    {"default": "TORCH_FLASH", "tooltip": "Attention backend used by xFuser-enabled execution."},
                 ),
                 "use_mmap": (
                     "BOOLEAN",
                     {
                         "default": False,
                         "tooltip": "Use mmap-backed safetensor loading. This can reduce RAM spikes during model load, especially for large checkpoints.",
+                    },
+                ),
+                "skip_comm_test": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Skip the startup NCCL communication test. Faster startup, but distributed issues are caught later.",
                     },
                 ),
             },
