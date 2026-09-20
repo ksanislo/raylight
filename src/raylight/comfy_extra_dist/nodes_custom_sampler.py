@@ -74,13 +74,21 @@ def _collect_grouped_results(results: list, expected_length: int, label: str):
     return [grouped_results[dp_rank] for dp_rank in range(expected_length)]
 
 
-def _clear_ray_worker_vram_after_sampling(ray_actors):
+def _clear_ray_worker_vram_after_sampling(ray_actors, force=False):
+    """Release worker VRAM once sampling is done.
+
+    `force` is for the failure path. A sampler that raises, most often on OOM,
+    leaves its allocations behind, and the next run inherits a card that is
+    already full. That is worth clearing whether or not the workflow asked for
+    routine cleanup.
+    """
     gpu_actors = ray_actors["workers"]
     if not gpu_actors:
         return
-    parallel_dict = ray.get(gpu_actors[0].get_parallel_dict.remote())
-    if not parallel_dict.get("clear_vram_after_sampling", False):
-        return
+    if not force:
+        parallel_dict = ray.get(gpu_actors[0].get_parallel_dict.remote())
+        if not parallel_dict.get("clear_vram_after_sampling", False):
+            return
 
     ray.get([actor.clear_sampling_vram.remote() for actor in gpu_actors])
     gc.collect()
@@ -485,7 +493,11 @@ class XFuserSamplerCustomAdvanced:
             )
             for actor in gpu_actors
         ]
-        results = _gather_with_progress(futures)
+        try:
+            results = _gather_with_progress(futures)
+        except Exception:
+            _clear_ray_worker_vram_after_sampling(ray_actors, force=True)
+            raise
         _clear_ray_worker_vram_after_sampling(ray_actors)
         output, denoised_output = results[0]
         return (output, denoised_output, ray_actors)
@@ -561,7 +573,11 @@ class XFuserSamplerCustom:
             )
             for actor in gpu_actors
         ]
-        results = _gather_with_progress(futures)
+        try:
+            results = _gather_with_progress(futures)
+        except Exception:
+            _clear_ray_worker_vram_after_sampling(ray_actors, force=True)
+            raise
         _clear_ray_worker_vram_after_sampling(ray_actors)
         out = results[0]
         return (out, ray_actors)
@@ -620,7 +636,11 @@ class UnifiedParallelSamplerCustomAdvanced:
             )
             for actor, group_info in zip(gpu_actors, group_infos)
         ]
-        results = _gather_with_progress(futures)
+        try:
+            results = _gather_with_progress(futures)
+        except Exception:
+            _clear_ray_worker_vram_after_sampling(ray_actors, force=True)
+            raise
         _clear_ray_worker_vram_after_sampling(ray_actors)
         results = _collect_grouped_results(results, dp_degree, "Unified Parallel SamplerCustomAdvanced")
         outputs, denoised_outputs = _split_advanced_results(results)
@@ -707,7 +727,11 @@ class UnifiedParallelSamplerCustom:
             )
             for actor, group_info in zip(gpu_actors, group_infos)
         ]
-        results = _gather_with_progress(futures)
+        try:
+            results = _gather_with_progress(futures)
+        except Exception:
+            _clear_ray_worker_vram_after_sampling(ray_actors, force=True)
+            raise
         _clear_ray_worker_vram_after_sampling(ray_actors)
         out = _collect_grouped_results(results, dp_degree, "Unified Parallel SamplerCustom")
         return (out, ray_actors)
@@ -762,7 +786,11 @@ class DPSamplerCustomAdvanced:
             )
             for i, actor in enumerate(gpu_actors)
         ]
-        results = _gather_with_progress(futures)
+        try:
+            results = _gather_with_progress(futures)
+        except Exception:
+            _clear_ray_worker_vram_after_sampling(ray_actors, force=True)
+            raise
         _clear_ray_worker_vram_after_sampling(ray_actors)
         outputs, denoised_outputs = _split_advanced_results(results)
         return (outputs, denoised_outputs, ray_actors)
@@ -852,7 +880,11 @@ class DPSamplerCustom:
             )
             for i, actor in enumerate(gpu_actors)
         ]
-        out = _gather_with_progress(futures)
+        try:
+            out = _gather_with_progress(futures)
+        except Exception:
+            _clear_ray_worker_vram_after_sampling(ray_actors, force=True)
+            raise
         _clear_ray_worker_vram_after_sampling(ray_actors)
         return (out, ray_actors)
 
