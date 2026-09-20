@@ -398,11 +398,22 @@ def _time_forwards():
     _orig_apply_model = comfy.model_base.BaseModel._apply_model
 
     def timed_apply_model(self, *args, **kwargs):
+        if not _forward_times:
+            print("[Raylight][FORWARD-START]", flush=True)
         start = time.perf_counter()
         try:
             return _orig_apply_model(self, *args, **kwargs)
         finally:
-            _forward_times.append(time.perf_counter() - start)
+            elapsed = time.perf_counter() - start
+            _forward_times.append(elapsed)
+            print(f"[Raylight][FORWARD-DONE] {len(_forward_times)} {elapsed:.1f}s", flush=True)
+            global _residency_done
+            if not _residency_done and os.environ.get("RAYLIGHT_FSDP_RESIDENCY") == "1":
+                _residency_done = True
+                try:
+                    residency(self.diffusion_model, int(os.environ.get("RANK", "0")))
+                except Exception as e:
+                    print(f"[Raylight][RESIDENCY] unavailable: {e}", flush=True)
 
     comfy.model_base.BaseModel._apply_model = timed_apply_model
 
@@ -418,3 +429,55 @@ def report_forwards(rank):
         f"mean={sum(times) / len(times):.2f}s  [{joined}]",
         flush=True,
     )
+
+
+_residency_done = False
+
+
+def residency(model, rank):
+    """Where do the sharded bytes actually live during a forward?
+
+    The census counts what was sharded; this counts what is resident. A gap
+    between the two means something is already moving shards off the device,
+    which would be a lever to turn up rather than a mechanism to build.
+    """
+    from torch.distributed.fsdp import FSDPModule
+    from torch.distributed.fsdp._fully_shard._fsdp_state import _get_module_fsdp_state
+
+    by_device = collections.Counter()
+    unsharded = collections.Counter()
+    groups = 0
+    for module in model.modules():
+        if not isinstance(module, FSDPModule):
+            continue
+        state = _get_module_fsdp_state(module)
+        group = getattr(state, "_fsdp_param_group", None) if state is not None else None
+        if group is None:
+            continue
+        groups += 1
+        for prm in group.fsdp_params:
+            for attr, counter in (("_sharded_param_data", by_device),
+                                  ("_unsharded_param_data", unsharded)):
+                t = getattr(prm, attr, None)
+                if not isinstance(t, torch.Tensor):
+                    continue
+                inner = getattr(t, "_qdata", None)
+                real = inner if isinstance(inner, torch.Tensor) else t
+                try:
+                    counter[str(real.device)] += real.numel() * real.element_size()
+                except Exception:
+                    pass
+
+    def fmt(counter):
+        return " ".join(f"{d}={n / 2**20:.0f}MiB" for d, n in counter.most_common()) or "none"
+
+    print(f"[Raylight][RESIDENCY rank{rank}] groups={groups} "
+          f"sharded: {fmt(by_device)} | unsharded: {fmt(unsharded)}", flush=True)
+    try:
+        free, total = torch.cuda.mem_get_info()
+        print(f"[Raylight][RESIDENCY rank{rank}] torch allocated="
+              f"{torch.cuda.memory_allocated() / 2**20:.0f}MiB "
+              f"reserved={torch.cuda.memory_reserved() / 2**20:.0f}MiB "
+              f"device_free={free / 2**20:.0f}MiB of {total / 2**20:.0f}MiB", flush=True)
+    except Exception:
+        pass
