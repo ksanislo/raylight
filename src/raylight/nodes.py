@@ -171,6 +171,7 @@ def _build_local_runtime_env(module_dir: Path, repo_root: Path, runtime_workdir:
         "RAYLIGHT_FSDP_PROF_FILE",
         "RAYLIGHT_FSDP_TRACE",
         "RAYLIGHT_FSDP_H2D_TRACE",
+        "RAYLIGHT_FSDP_RESIDENCY",
     ):
         _val = os.environ.get(_name)
         if _val is not None:
