@@ -2,6 +2,7 @@ import raylight
 import os
 import gc
 import json
+import logging
 import shutil
 import tempfile
 from typing import Any
@@ -143,6 +144,10 @@ def _build_local_runtime_env(module_dir: Path, repo_root: Path, runtime_workdir:
         "PYTHONPATH": python_path,
         "COMFYUI_BASE_DIRECTORY": str(repo_root),
     }
+    for name in _WORKER_ENV_KNOBS:
+        value = os.environ.get(name)
+        if value is not None:
+            env_vars[name] = value
     alloc_conf = _sanitized_worker_alloc_conf()
     if alloc_conf is not None:
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = alloc_conf
@@ -152,6 +157,31 @@ def _build_local_runtime_env(module_dir: Path, repo_root: Path, runtime_workdir:
         "working_dir": str(runtime_workdir),
         "env_vars": env_vars,
     }
+
+
+# Knobs a worker reads from its environment. They are forwarded from the host so a
+# server-wide setting still works, and RayWorkerOptions can override any of them per
+# workflow without a restart.
+_WORKER_ENV_KNOBS = (
+    "RAYLIGHT_LORA_BYPASS",
+)
+
+
+def _apply_worker_options(env_vars, options):
+    """Fold RayWorkerOptions into the worker environment.
+
+    Every option defaults to "auto", which leaves whatever the host was started with,
+    so a workflow that does not carry the node behaves exactly as before.
+    """
+    if not options:
+        return
+    for name, value in options.items():
+        if name not in _WORKER_ENV_KNOBS:
+            continue
+        if value is None:
+            continue
+        env_vars[name] = value
+        logging.info("[Raylight] worker option %s=%s", name, value)
 
 
 def _worker_cli_args_env_json() -> str:
@@ -481,6 +511,7 @@ class RayInitializer:
         ray_object_store_gb: float = 2.0,
         ray_dashboard_address: str = "None",
         torch_dist_address: str = "None",
+        worker_options=None,
     ):
         # THIS IS PYTORCH DIST ADDRESS
         # (TODO) Change so it can be use in cluster of nodes. but it is long waaaaay down in the priority list
@@ -593,6 +624,8 @@ class RayInitializer:
         if selected_gpus is not None:
             # Adapted from avtc's Ray GPU visibility restriction idea.
             runtime_env_base.setdefault("env_vars", {})["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_idx) for gpu_idx in selected_gpus)
+
+        _apply_worker_options(runtime_env_base.setdefault("env_vars", {}), worker_options)
 
         _inject_worker_cli_args(runtime_env_base)
 
@@ -735,6 +768,10 @@ class RayInitializerAdvanced(RayInitializer):
                 ),
             },
             "optional": {
+                "worker_options": (
+                    "RAY_WORKER_OPTIONS",
+                    {"tooltip": "Optional RayWorkerOptions node, for the worker knobs that otherwise only exist as server-wide environment variables."},
+                ),
                 "ray_object_store_gb": (
                     "FLOAT",
                     {
@@ -1840,7 +1877,45 @@ class RaySeedVR2VAEDecodeDistributed:
         return (image,)
 
 
+class RayWorkerOptions:
+    """Per-workflow overrides for the knobs a worker reads from its environment.
+
+    These otherwise exist only as server-wide environment variables, which means a
+    restart to change one and the same value for every workflow. Kept off
+    RayInitializerAdvanced so its panel stays readable; plug this into its
+    `worker_options` input when you need something other than the server default.
+    """
+
+    TRI = ["auto", "on", "off"]
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "lora_bypass": (
+                    ["auto", "default", "resident", "pinned"],
+                    {"display_name": "LoRA bypass operand placement",
+                     "default": "auto",
+                     "tooltip": "Where the LoRA bypass keeps its operands. `resident` holds them on the card, `pinned` in pinned host memory. `auto` keeps the server setting (RAYLIGHT_LORA_BYPASS).",
+                     },
+                ),
+            }
+        }
+
+    RETURN_TYPES = ("RAY_WORKER_OPTIONS",)
+    RETURN_NAMES = ("worker_options",)
+    FUNCTION = "build"
+    CATEGORY = "Raylight"
+
+    def build(self, lora_bypass):
+        options = {}
+        if lora_bypass != "auto":
+            # `default` means the plain path, which the worker reads as an unset value
+            options["RAYLIGHT_LORA_BYPASS"] = "" if lora_bypass == "default" else lora_bypass
+        return (options,)
+
 NODE_CLASS_MAPPINGS = {
+    "RayWorkerOptions": RayWorkerOptions,
     "XFuserKSamplerAdvanced": XFuserKSamplerAdvanced,
     "UnifiedParallelSampler": UnifiedParallelSampler,
     "DPKSamplerAdvanced": DPKSamplerAdvanced,
@@ -1861,6 +1936,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "RayWorkerOptions": "Ray Worker Options",
     "XFuserKSamplerAdvanced": "XFuser KSampler (Advanced)",
     "UnifiedParallelSampler": "Unified Parallel Sampler (Advance)",
     "DPKSamplerAdvanced": "Data Parallel KSampler (Advanced)",
