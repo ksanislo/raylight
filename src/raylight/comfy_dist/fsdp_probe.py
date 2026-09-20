@@ -401,9 +401,25 @@ def _time_forwards():
         if not _forward_times:
             print("[Raylight][FORWARD-START]", flush=True)
         start = time.perf_counter()
+        result = None
         try:
-            return _orig_apply_model(self, *args, **kwargs)
+            result = _orig_apply_model(self, *args, **kwargs)
+            return result
         finally:
+            # Statistics of the model output, so two parallelism layouts can be
+            # compared numerically at the same seed. A layout that silently
+            # drops work is fast and shape correct but shifts this.
+            if os.environ.get("RAYLIGHT_FSDP_OUTSTATS") == "1" and isinstance(result, torch.Tensor):
+                try:
+                    f = result.float()
+                    print(
+                        f"[Raylight][OUTSTATS] n={len(_forward_times) + 1} "
+                        f"mean={f.mean().item():+.6f} std={f.std().item():.6f} "
+                        f"absmax={f.abs().max().item():.4f} shape={tuple(result.shape)}",
+                        flush=True,
+                    )
+                except Exception as e:
+                    print(f"[Raylight][OUTSTATS] unavailable: {e}", flush=True)
             elapsed = time.perf_counter() - start
             _forward_times.append(elapsed)
             print(f"[Raylight][FORWARD-DONE] {len(_forward_times)} {elapsed:.1f}s", flush=True)
