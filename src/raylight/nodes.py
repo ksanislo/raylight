@@ -697,41 +697,41 @@ class RayInitializerAdvanced(RayInitializer):
             "required": {
                 "ray_cluster_address": (
                     "STRING",
-                    {
+                    {"display_name": "Ray cluster address", 
                         "default": "local",
                         "tooltip": "Ray cluster address. Use `local` for one machine, or a Ray head address for a remote cluster.",
                     },
                 ),
                 "ray_cluster_namespace": (
                     "STRING",
-                    {"default": "default", "tooltip": "Ray namespace used to isolate this session from other Ray jobs."},
+                    {"display_name": "Ray namespace", "default": "default", "tooltip": "Ray namespace used to isolate this session from other Ray jobs."},
                 ),
-                "GPU": ("INT", {"default": 2, "tooltip": "How many GPUs / Ray workers to launch."}),
+                "GPU": ("INT", {"display_name": "GPU count", "default": 2, "tooltip": "How many GPUs / Ray workers to launch."}),
                 "GPU_SELECT": (
                     "STRING",
-                    {
+                    {"display_name": "GPU indices", 
                         "default": "",
                         "tooltip": "GPU indices for Ray workers. Use comma separated values like 0,1,2 to limit Ray to those GPUs, or leave empty to use all visible GPUs. Useful if you want to reserve GPU 0 for CLIP or VAE.",
                     },
                 ),
                 "ulysses_degree": (
                     "INT",
-                    {"default": 2, "tooltip": "Sequence parallel degree for Ulysses. Set above 1 to split sequence work across GPUs."},
+                    {"display_name": "Ulysses degree", "default": 2, "tooltip": "Sequence parallel degree for Ulysses. Set above 1 to split sequence work across GPUs."},
                 ),
                 "ring_degree": (
                     "INT",
-                    {
+                    {"display_name": "Ring degree", 
                         "default": 1,
                         "tooltip": "Ring attention degree. Usually leave at 1 unless you are intentionally testing ring parallelism.",
                     },
                 ),
                 "cfg_degree": (
                     "INT",
-                    {"default": 1, "tooltip": "CFG parallel degree. `2` splits conditional and unconditional passes across GPUs."},
+                    {"display_name": "CFG degree", "default": 1, "tooltip": "CFG parallel degree. `2` splits conditional and unconditional passes across GPUs."},
                 ),
                 "dp_degree": (
                     "INT",
-                    {
+                    {"display_name": "Data parallel degree", 
                         "default": 1,
                         "min": 0,
                         "tooltip": "Data-parallel degree. Default 1 keeps the legacy layout. Leave 0 when using Unified Parallel Sampler to auto use the remaining GPUs after ulysses/ring/cfg.",
@@ -739,37 +739,37 @@ class RayInitializerAdvanced(RayInitializer):
                 ),
                 "sync_ulysses": (
                     "BOOLEAN",
-                    {
+                    {"display_name": "Sync Ulysses", 
                         "default": False,
                         "tooltip": "Force a more synchronized Ulysses path. Can help with some VRAM spikes, but may be slower.",
                     },
                 ),
-                "FSDP": ("BOOLEAN", {"default": False, "tooltip": "Enable FSDP weight sharding across GPUs."}),
+                "FSDP": ("BOOLEAN", {"display_name": "FSDP (shard weights)", "default": False, "tooltip": "Enable FSDP weight sharding across GPUs."}),
                 "FSDP_CPU_OFFLOAD": (
                     "BOOLEAN",
-                    {"default": False, "tooltip": "When FSDP is on, offload inactive model shards to CPU RAM."},
+                    {"display_name": "FSDP: keep shards in RAM", "default": False, "tooltip": "When FSDP is on, offload inactive model shards to CPU RAM."},
                 ),
                 "clear_vram_after_sampling": (
                     "BOOLEAN",
-                    {
+                    {"display_name": "Clear VRAM after sampling", 
                         "default": False,
                         "tooltip": "Release Ray worker VRAM after sampling so regular Comfy nodes can use the GPU.",
                     },
                 ),
                 "XFuser_attention": (
                     [member.name for member in AttnType],
-                    {"default": "TORCH_FLASH", "tooltip": "Attention backend used by xFuser-enabled execution."},
+                    {"display_name": "Attention backend", "default": "TORCH_FLASH", "tooltip": "Attention backend used by xFuser-enabled execution."},
                 ),
                 "use_mmap": (
                     "BOOLEAN",
-                    {
+                    {"display_name": "Load weights via mmap", 
                         "default": False,
                         "tooltip": "Use mmap-backed safetensor loading. This can reduce RAM spikes during model load, especially for large checkpoints.",
                     },
                 ),
                 "skip_comm_test": (
                     "BOOLEAN",
-                    {
+                    {"display_name": "Skip comm test", 
                         "default": False,
                         "tooltip": "Skip the startup NCCL communication test. Faster startup, but distributed issues are caught later.",
                     },
@@ -778,25 +778,25 @@ class RayInitializerAdvanced(RayInitializer):
             "optional": {
                 "ray_object_store_gb": (
                     "FLOAT",
-                    {
+                    {"display_name": "Ray object store (GB)", 
                         "default": 2.0,
                         "tooltip": "Ray object-store size in GB. Usually the default is enough unless you move large tensors through Ray.",
                     },
                 ),
                 "ray_dashboard_address": (
                     "STRING",
-                    {"default": "None", "tooltip": "Optional Ray dashboard bind address like `127.0.0.1:8265` for monitoring."},
+                    {"display_name": "Ray dashboard address", "default": "None", "tooltip": "Optional Ray dashboard bind address like `127.0.0.1:8265` for monitoring."},
                 ),
                 "torch_dist_address": (
                     "STRING",
-                    {
+                    {"display_name": "Torch distributed address", 
                         "default": "127.0.0.1:29500",
                         "tooltip": "Torch distributed master address used by worker-side NCCL init. Restart ComfyUI if you change it.",
                     },
                 ),
                 "worker_vram_headroom": (
                     "FLOAT",
-                    {
+                    {"display_name": "Worker VRAM headroom (GB)", 
                         "default": -1.0,
                         "min": -1.0,
                         "max": 64.0,
@@ -806,7 +806,7 @@ class RayInitializerAdvanced(RayInitializer):
                 ),
                 "worker_reserve_vram": (
                     "FLOAT",
-                    {
+                    {"display_name": "Worker reserved VRAM (GB)", 
                         "default": -1.0,
                         "min": -1.0,
                         "max": 64.0,
