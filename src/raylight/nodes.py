@@ -175,6 +175,9 @@ def _worker_cli_args_env_json() -> str:
         "supports_fp8_compute": bool(comfy_args.supports_fp8_compute),
         "enable_triton_backend": bool(comfy_args.enable_triton_backend),
         "fast": sorted(feature.value for feature in comfy_args.fast),
+        # Workers need this to build a previewer; without it they default to
+        # NoPreviews and the sampler never produces preview images to relay.
+        "preview_method": comfy_args.preview_method.value,
     }
     return json.dumps(worker_cli_args, sort_keys=True)
 
