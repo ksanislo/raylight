@@ -157,8 +157,10 @@ def _build_local_runtime_env(module_dir: Path, repo_root: Path, runtime_workdir:
 def _worker_cli_args_env_json() -> str:
     worker_cli_args = {
         # Ray workers hit cudaHostRegister failures on large LTXV loads often enough
-        # that we disable pinned memory there by default.
-        "disable_pinned_memory": True,
+        # that we disable pinned memory there by default. Pinned host memory is
+        # what lets a host to device copy actually run asynchronously, so
+        # RAYLIGHT_WORKER_PIN opts back in where the load is known to succeed.
+        "disable_pinned_memory": os.environ.get("RAYLIGHT_WORKER_PIN") != "1",
         "disable_mmap": bool(comfy_args.disable_mmap),
         "mmap_torch_files": bool(comfy_args.mmap_torch_files),
         "disable_smart_memory": bool(comfy_args.disable_smart_memory),
