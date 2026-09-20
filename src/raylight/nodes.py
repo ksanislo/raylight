@@ -36,13 +36,21 @@ class AnyType(str):
 any_type = AnyType("*")
 
 
-def _clear_ray_worker_vram_after_sampling(ray_actors):
+def _clear_ray_worker_vram_after_sampling(ray_actors, force=False):
+    """Release worker VRAM once sampling is done.
+
+    `force` is for the failure path. A sampler that raises, most often on OOM,
+    leaves its allocations behind, and the next run inherits a card that is
+    already full. That is worth clearing whether or not the workflow asked for
+    routine cleanup.
+    """
     gpu_actors = ray_actors["workers"]
     if not gpu_actors:
         return
-    parallel_dict = ray.get(gpu_actors[0].get_parallel_dict.remote())
-    if not parallel_dict.get("clear_vram_after_sampling", False):
-        return
+    if not force:
+        parallel_dict = ray.get(gpu_actors[0].get_parallel_dict.remote())
+        if not parallel_dict.get("clear_vram_after_sampling", False):
+            return
 
     ray.get([actor.clear_sampling_vram.remote() for actor in gpu_actors])
     gc.collect()
@@ -1261,7 +1269,11 @@ class XFuserKSamplerAdvanced:
             for actor in gpu_actors
         ]
 
-        results = ray.get(futures)
+        try:
+            results = ray.get(futures)
+        except Exception:
+            _clear_ray_worker_vram_after_sampling(ray_actors, force=True)
+            raise
         _clear_ray_worker_vram_after_sampling(ray_actors)
         return (results[0][0], ray_actors)
 
@@ -1383,7 +1395,11 @@ class UnifiedParallelSampler:
             for actor, group_info in zip(gpu_actors, group_infos)
         ]
 
-        results = ray.get(futures)
+        try:
+            results = ray.get(futures)
+        except Exception:
+            _clear_ray_worker_vram_after_sampling(ray_actors, force=True)
+            raise
         _clear_ray_worker_vram_after_sampling(ray_actors)
         results = _collect_grouped_results(results, dp_degree, "Unified Parallel Sampler")
         return (results, ray_actors)
@@ -1519,7 +1535,11 @@ class DPKSamplerAdvanced:
             for i, actor in enumerate(gpu_actors)
         ]
 
-        results = ray.get(futures)
+        try:
+            results = ray.get(futures)
+        except Exception:
+            _clear_ray_worker_vram_after_sampling(ray_actors, force=True)
+            raise
         _clear_ray_worker_vram_after_sampling(ray_actors)
         results = [result[0] for result in results]
         return (results, ray_actors)
