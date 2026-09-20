@@ -36,7 +36,9 @@ def _split_packed_sequence(h, rope_freqs, mod_segments):
 # and attention dominates both activation memory and step time. The attention
 # branch is safe in fp16 while the residual stays fp32, except for out_proj:
 # its output peaks at 6.63e4 against fp16's 65504, so it is scaled by a power of
-# two (exact, both projections have bias=False) and unscaled in fp32.
+# two (exact, both projections have bias=False) and unscaled in fp32. The scale
+# is applied in place on the fp16 tensor rather than on the fp32 value, so no
+# full size fp32 copy of the attention output is materialised.
 _ATTN_FP16_OUT_PROJ_SCALE = 64.0
 
 
@@ -75,7 +77,9 @@ def usp_attn_forward(self, x, rope_freqs=None, transformer_options={}):
     out = xfuser_optimized_attention(q, k, v, self.heads, skip_reshape=True, transformer_options=transformer_options)
     out = out.squeeze(0)
     if fp16:
-        out = out.div(_ATTN_FP16_OUT_PROJ_SCALE).to(torch.float16)
+        if out.dtype != torch.float16:
+            out = out.to(torch.float16)
+        out = out.div_(_ATTN_FP16_OUT_PROJ_SCALE)
         return self.out_proj(out).to(torch.float32).mul_(_ATTN_FP16_OUT_PROJ_SCALE)
     return self.out_proj(out)
 
