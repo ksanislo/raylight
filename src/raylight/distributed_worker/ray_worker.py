@@ -3,7 +3,9 @@ import sys
 import gc
 import json
 import logging
+import contextlib
 import functools
+import inspect
 from datetime import timedelta
 
 import torch
@@ -88,13 +90,19 @@ def _apply_worker_comfy_cli_args_from_env():
 
     try:
         import comfy.cli_args
-        from comfy.cli_args import PerformanceFeature
+        from comfy.cli_args import LatentPreviewMethod, PerformanceFeature
     except Exception as exc:
         logging.warning(f"Failed to import Comfy modules for worker CLI arg sync: {exc}")
         return worker_cli_args
 
     if "fast" in worker_cli_args:
         worker_cli_args["fast"] = {PerformanceFeature(feature) for feature in worker_cli_args["fast"]}
+
+    if "preview_method" in worker_cli_args:
+        try:
+            worker_cli_args["preview_method"] = LatentPreviewMethod(worker_cli_args["preview_method"])
+        except ValueError:
+            worker_cli_args.pop("preview_method")
 
     comfy_args = comfy.cli_args.args
     for key, value in worker_cli_args.items():
@@ -371,6 +379,115 @@ def _build_ray_guider(model, guider_spec):
     guider.set_conds(guider_spec["positive"], guider_spec["middle"], guider_spec["negative"])
     guider.set_cfg(guider_spec["cfg1"], guider_spec["cfg2"], guider_spec.get("nested", False))
     return guider
+
+
+@contextlib.contextmanager
+def _progress_reporting(model, local_rank, total_steps=1):
+    """Publish sampler progress from rank 0 so the host can display it.
+
+    ComfyUI's ProgressBar reports through a global hook owned by the server,
+    which exists only in the host process, so a worker's updates go nowhere.
+    Rank 0 installs its own hook and writes to the progress side channel.
+    Per-block forward hooks fill the long gaps between sampler steps: with
+    four steps over fifty blocks the bar advances two hundred times, not four.
+    Blocks are found by walking the diffusion model for ModuleLists, so this
+    works for any architecture and degrades to step-only if none are found.
+    """
+    if local_rank != 0:
+        yield
+        return
+
+    import comfy.utils as comfy_utils
+    from raylight import progress
+
+    def _collect_blocks(module, depth=0):
+        """Top-most repeated ModuleLists, wherever the architecture puts them.
+
+        Some models expose blocks directly on the diffusion model, others nest
+        them a level or two down. Recurse until a ModuleList is found, then
+        stop: descending further would count a block's own sublayers.
+        """
+        found = []
+        for child in module.children():
+            if isinstance(child, torch.nn.ModuleList) and len(child) > 1:
+                found.extend(child)
+            elif depth < 3:
+                found.extend(_collect_blocks(child, depth + 1))
+        return found
+
+    root = getattr(getattr(model, "model", model), "diffusion_model", None)
+    blocks = _collect_blocks(root) if root is not None else []
+    n_blocks = max(len(blocks), 1)
+    state = {"step": 0, "steps": max(int(total_steps), 1), "seen": 0, "pseq": 0}
+    progress.clear()
+
+    def on_step(value, total, preview=None, **_kwargs):
+        # ComfyUI passes node_id as a keyword; accept whatever it sends.
+        state["step"] = int(value)
+        state["steps"] = max(int(total), 1)
+        state["seen"] = 0
+        if preview is not None:
+            try:
+                progress.write_preview(preview[1])
+                state["pseq"] += 1
+            except Exception:
+                pass
+        progress.write(state["step"] * n_blocks, state["steps"] * n_blocks,
+                       force=True, preview_seq=state["pseq"])
+
+    def on_block(_module, _args, _output):
+        state["seen"] = min(state["seen"] + 1, n_blocks)
+        progress.write(state["step"] * n_blocks + state["seen"],
+                       state["steps"] * n_blocks, preview_seq=state["pseq"])
+
+    previous = comfy_utils.PROGRESS_BAR_HOOK
+    comfy_utils.set_progress_bar_global_hook(on_step)
+    handles = []
+    try:
+        for block in blocks:
+            try:
+                handles.append(block.register_forward_hook(on_block))
+            except Exception:
+                pass
+        yield
+    finally:
+        for handle in handles:
+            try:
+                handle.remove()
+            except Exception:
+                pass
+        comfy_utils.set_progress_bar_global_hook(previous)
+        progress.clear()
+
+
+def _sampler_step_count(signature, args, kwargs):
+    """Best effort step count so the bar is scaled correctly from the start.
+
+    Without it the bar is sized for one step, fills as the first step's blocks
+    run, then snaps backwards when the real total arrives.
+    """
+    try:
+        bound = signature.bind_partial(*args, **kwargs)
+        sigmas = bound.arguments.get("sigmas")
+        if sigmas is not None:
+            return max(int(sigmas.shape[-1]) - 1, 1)
+        steps = bound.arguments.get("steps")
+        if steps:
+            return max(int(steps), 1)
+    except Exception:
+        pass
+    return 1
+
+
+def report_progress(fn):
+    signature = inspect.signature(fn)
+
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        steps = _sampler_step_count(signature, (self,) + args, kwargs)
+        with _progress_reporting(self.model, self.local_rank, steps):
+            return fn(self, *args, **kwargs)
+    return wrapper
 
 
 class RayWorker:
@@ -1089,6 +1206,7 @@ class RayWorker:
     def ray_seedvr2_vae_decode_partial(self, samples, tile_size, overlap=64, job_rank=0, job_world_size=1):
         return ray_seedvr2_vae_decode_partial_impl(self, samples, tile_size, overlap, job_rank, job_world_size)
 
+    @report_progress
     @patch_temp_fix_ck_ops
     @patch_ray_tqdm
     @patch_enable_comfy_kitchen_fsdp
@@ -1186,6 +1304,7 @@ class RayWorker:
             return self._grouped_sampling_result(result)
         return result
 
+    @report_progress
     @patch_temp_fix_ck_ops
     @patch_ray_tqdm
     @patch_enable_comfy_kitchen_fsdp
@@ -1323,6 +1442,7 @@ class RayWorker:
             if self.local_rank == 0:
                 print(f"[Rank {self.local_rank}] VAE cache freed")
 
+    @report_progress
     @patch_temp_fix_ck_ops
     @patch_ray_tqdm
     @patch_enable_comfy_kitchen_fsdp
