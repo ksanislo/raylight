@@ -3,6 +3,7 @@ from __future__ import annotations
 import collections
 import logging
 import gc
+import os
 from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
@@ -386,6 +387,13 @@ def patch_fsdp(self):
                 print(f"[Rank {self.rank}] Materialized {count} excluded ControlNet-shared params on {target_device}")
 
         _pre_init_fsdp(diffusion_model)
+
+    if os.environ.get("RAYLIGHT_FSDP_PROBE") == "1":
+        from . import fsdp_probe
+
+        fsdp_probe.install()
+        fsdp_probe.census(diffusion_model, self.rank)
+
     self.fsdp_state_dict = None
 
     print("FSDP registered successfully.")

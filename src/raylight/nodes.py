@@ -200,6 +200,17 @@ _WORKER_ENV_KNOBS = (
     "RAYLIGHT_LORA_BYPASS",
 )
 
+#Forwarded to the workers like the knobs above, but kept out of RayWorkerOptions:
+#these select measurement scaffolding, not something a workflow should carry.
+_PROBE_ENV_KNOBS = (
+    "RAYLIGHT_FSDP_PROBE",
+    "RAYLIGHT_FSDP_PROFILE",
+    "RAYLIGHT_FSDP_PROFILE_RANGE",
+    "RAYLIGHT_FSDP_PROF_FILE",
+    "RAYLIGHT_FSDP_TRACE",
+    "RAYLIGHT_FSDP_H2D_TRACE",
+)
+
 
 def _apply_worker_options(env_vars, options):
     """Fold RayWorkerOptions into the worker environment.
@@ -230,7 +241,7 @@ def _build_local_runtime_env(module_dir: Path, repo_root: Path, runtime_workdir:
         "COMFYUI_BASE_DIRECTORY": str(repo_root),
     }
     _add_nvrtc_library_path(env_vars)
-    for name in _WORKER_ENV_KNOBS:
+    for name in _WORKER_ENV_KNOBS + _PROBE_ENV_KNOBS:
         value = os.environ.get(name)
         if value is not None:
             env_vars[name] = value
