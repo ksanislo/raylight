@@ -358,13 +358,19 @@ class FSDPModelPatcher(comfy.model_patcher.ModelPatcher):
         fsdp_state_dict: dict | None = None,
         device_mesh=None,
         is_cpu_offload: bool = False,
+        **kwargs,
     ):
+        # Forward whatever ModelPatcher takes beyond our own arguments. ComfyUI
+        # grows this signature over time -- fast_disk arrived in 7a0b5eed -- and
+        # clone() passes every parameter positionally by name, so a subclass that
+        # pins the signature breaks on the next addition.
         super().__init__(
             model=model,
             load_device=load_device,
             offload_device=offload_device,
             size=size,
             weight_inplace_update=weight_inplace_update,
+            **kwargs,
         )
         self.rank = rank
         self.fsdp_state_dict = fsdp_state_dict
@@ -684,6 +690,7 @@ class PipefusionModelPatcher(comfy.model_patcher.ModelPatcher):
         pipefusion_config: "PipeFusionConfig | None" = None,
         stage_plan: "StagePlan | None" = None,
         parallel_context: "XFuserParallelContext | None" = None,
+        **kwargs,
     ):
         super().__init__(
             model=model,
@@ -691,6 +698,7 @@ class PipefusionModelPatcher(comfy.model_patcher.ModelPatcher):
             offload_device=offload_device,
             size=size,
             weight_inplace_update=weight_inplace_update,
+            **kwargs,
         )
         self.pipefusion_config = pipefusion_config
         self.pipefusion_stage = stage_plan
