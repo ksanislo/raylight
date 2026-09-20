@@ -418,6 +418,15 @@ if hasattr(model_base, "MiniMaxH3"):
         for i, block in enumerate(model.token_refiner.blocks):
             if f"diffusion_model.token_refiner.blocks.{i}.mlp.fc2" in sidecar_groups:
                 block.mlp.forward = types.MethodType(usp_mlp_forward, block.mlp)
+        from ..block_stream import BlockStreamer, enabled as _stream_enabled
+        if _stream_enabled():
+            _dev = next(model.parameters()).device
+            _streamer = BlockStreamer(model.blocks, _dev)
+            _freed = _streamer.offload_all()
+            _streamer.install()
+            model._raylight_block_streamer = _streamer
+            print(f"[Raylight] block streaming: {_freed/2**20:.0f} MiB of block weights "
+                  f"moved to host across {len(model.blocks)} blocks", flush=True)
         model._forward = types.MethodType(usp_dit_forward, model)
         import os as _os
 
