@@ -162,6 +162,9 @@ def _build_local_runtime_env(module_dir: Path, repo_root: Path, runtime_workdir:
     mlp_chunk = os.environ.get("RAYLIGHT_MLP_CHUNK_TOKENS")
     if mlp_chunk is not None:
         env_vars["RAYLIGHT_MLP_CHUNK_TOKENS"] = mlp_chunk
+    attn_fp16 = os.environ.get("RAYLIGHT_ATTN_FP16")
+    if attn_fp16 is not None:
+        env_vars["RAYLIGHT_ATTN_FP16"] = attn_fp16
     alloc_conf = _sanitized_worker_alloc_conf()
     if alloc_conf is not None:
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = alloc_conf
