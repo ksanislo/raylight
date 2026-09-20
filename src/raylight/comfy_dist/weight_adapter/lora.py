@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Optional
 
 import torch
@@ -12,6 +13,53 @@ from .base import (
     pad_tensor_to_shape,
     tucker_weight_from_conv,
 )
+
+_BYPASS_RESIDENT = os.environ.get("RAYLIGHT_LORA_BYPASS") == "resident"
+_BYPASS_PINNED = os.environ.get("RAYLIGHT_LORA_BYPASS") == "pinned"
+
+
+def _bypass_operands(adapter, up, down, device, dtype):
+    """Get the bypass operands onto the compute device.
+
+    The operands are constant across steps but the host copy is remade on every
+    forward, once per patched module, and an unpinned host buffer cannot satisfy
+    the non_blocking request: the driver stages the transfer and blocks the
+    calling thread until the stream drains.
+
+    resident  keeps the cast operands on the device, trading VRAM for the copy.
+    pinned    keeps them on the host but page locked, so the copy is genuinely
+              asynchronous and the host does not stall.
+    """
+    if _BYPASS_RESIDENT:
+        cache = getattr(adapter, "_bypass_cache", None)
+        key = (device, dtype)
+        if cache is None or cache[0] != key:
+            cache = (
+                key,
+                comfy.model_management.cast_to_device(up, device, dtype),
+                comfy.model_management.cast_to_device(down, device, dtype),
+            )
+            adapter._bypass_cache = cache
+        return cache[1], cache[2]
+
+    if _BYPASS_PINNED and not getattr(adapter, "_bypass_pinned", False):
+        try:
+            v = list(adapter.weights)
+            for i in (0, 1):
+                if v[i].device.type == "cpu" and not v[i].is_pinned():
+                    v[i] = v[i].pin_memory()
+            adapter.weights = tuple(v)
+            up, down = adapter.weights[0], adapter.weights[1]
+        except Exception as e:
+            logging.warning("[Raylight] could not page lock bypass operands: %s", e)
+        adapter._bypass_pinned = True
+
+    return (
+        comfy.model_management.cast_to_device(up, device, dtype),
+        comfy.model_management.cast_to_device(down, device, dtype),
+    )
+
+
 
 
 class LoraDiff(WeightAdapterTrainBase):
@@ -273,8 +321,7 @@ class LoRAAdapter(WeightAdapterBase):
         scale = alpha / rank if alpha is not None else 1.0
         scale *= getattr(self, "multiplier", 1.0)
 
-        up = comfy.model_management.cast_to_device(up, x.device, x.dtype)
-        down = comfy.model_management.cast_to_device(down, x.device, x.dtype)
+        up, down = _bypass_operands(self, up, down, x.device, x.dtype)
 
         is_conv = getattr(self, "is_conv", False)
         conv_dim = getattr(self, "conv_dim", 0)
