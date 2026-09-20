@@ -440,6 +440,29 @@ def _progress_reporting(model, local_rank, total_steps=1):
         progress.write(state["step"] * n_blocks + state["seen"],
                        state["steps"] * n_blocks, preview_seq=state["pseq"])
 
+    # ComfyUI maps a preview through ((x + 1) / 2).clamp(0, 1), which assumes
+    # the latent-to-RGB projection lands in -1..1. Video latents grow past that
+    # as denoising proceeds, so everything clamps to zero and every preview
+    # after the first is black. Rescale to the actual range first, ignoring
+    # outliers, so the fixed affine has something sensible to work with.
+    import latent_preview
+
+    original_preview_to_image = latent_preview.preview_to_image
+
+    def _ranged_preview_to_image(latent_image, do_scale=True):
+        try:
+            flat = latent_image.flatten().float()
+            if flat.numel() > 1:
+                low = torch.quantile(flat, 0.01)
+                high = torch.quantile(flat, 0.99)
+                if torch.isfinite(low) and torch.isfinite(high) and high > low:
+                    latent_image = ((latent_image - low) / (high - low)) * 2.0 - 1.0
+        except Exception:
+            pass
+        return original_preview_to_image(latent_image, do_scale)
+
+    latent_preview.preview_to_image = _ranged_preview_to_image
+
     previous = comfy_utils.PROGRESS_BAR_HOOK
     comfy_utils.set_progress_bar_global_hook(on_step)
     handles = []
@@ -457,6 +480,7 @@ def _progress_reporting(model, local_rank, total_steps=1):
             except Exception:
                 pass
         comfy_utils.set_progress_bar_global_hook(previous)
+        latent_preview.preview_to_image = original_preview_to_image
         progress.clear()
 
 
