@@ -229,6 +229,7 @@ _WORKER_ENV_KNOBS = (
     "RAYLIGHT_MLP_FP16",
     "RAYLIGHT_FP32_RESIDUAL",
     "RAYLIGHT_MLP_CHUNK_TOKENS",
+    "RAYLIGHT_LORA_BYPASS",
 )
 
 
@@ -2074,6 +2075,13 @@ class RayWorkerOptions:
                      "tooltip": "Slice the MLP along tokens to bound activation memory. 0 disables chunking. Changing it changes which sample a seed produces. -1 keeps the server setting (RAYLIGHT_MLP_CHUNK_TOKENS).",
                      },
                 ),
+                "lora_bypass": (
+                    ["auto", "default", "resident", "pinned"],
+                    {"display_name": "LoRA bypass operand placement",
+                     "default": "auto",
+                     "tooltip": "Where the LoRA bypass keeps its operands. `resident` holds them on the card, `pinned` in pinned host memory. `auto` keeps the server setting (RAYLIGHT_LORA_BYPASS).",
+                     },
+                ),
             }
         }
 
@@ -2082,7 +2090,7 @@ class RayWorkerOptions:
     FUNCTION = "build"
     CATEGORY = "Raylight"
 
-    def build(self, numa_bind, attention_fp16, mlp_fp16, fp32_residual, mlp_chunk_tokens):
+    def build(self, numa_bind, attention_fp16, mlp_fp16, fp32_residual, mlp_chunk_tokens, lora_bypass):
         def flag(value):
             # auto leaves the host environment untouched
             return None if value == "auto" else ("1" if value == "on" else "0")
@@ -2095,8 +2103,10 @@ class RayWorkerOptions:
         }
         if mlp_chunk_tokens >= 0:
             options["RAYLIGHT_MLP_CHUNK_TOKENS"] = str(mlp_chunk_tokens)
+        if lora_bypass != "auto":
+            # `default` means the plain path, which the worker reads as an unset value
+            options["RAYLIGHT_LORA_BYPASS"] = "" if lora_bypass == "default" else lora_bypass
         return ({k: v for k, v in options.items() if v is not None},)
-
 
 NODE_CLASS_MAPPINGS = {
     "RayWorkerOptions": RayWorkerOptions,
