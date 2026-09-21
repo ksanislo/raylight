@@ -1724,12 +1724,12 @@ class RayVAEDecodeDistributed:
                         "min": 64,
                         "max": 4096,
                         "step": 32,
-                        "tooltip": "Tile size for spatial decoding. Larger tiles use more memory.",
+                        "tooltip": "Tile size for spatial decoding. Larger tiles use more memory. Not used by VAEs that decode in temporal chunks.",
                     },
                 ),
                 "overlap": (
                     "INT",
-                    {"default": 64, "min": 0, "max": 4096, "step": 32, "tooltip": "Pixel overlap between tiles to prevent artifacts."},
+                    {"default": 64, "min": 0, "max": 4096, "step": 32, "tooltip": "Pixel overlap between tiles to prevent artifacts. Not used by VAEs that decode in temporal chunks."},
                 ),
                 "temporal_size": (
                     "INT",
@@ -1769,6 +1769,21 @@ class RayVAEDecodeDistributed:
 
         for actor in gpu_actors:
             ray.get(actor.ray_vae_loader.remote(vae_path))
+
+        # VAEs that decode in temporal chunks are split along time instead of tiled,
+        # which needs no feathering and keeps each rank's peak independent of clip length
+        if ray.get(gpu_actors[0].ray_vae_supports_temporal_chunks.remote()):
+            futures = [
+                actor.ray_vae_decode_temporal_partial.remote(
+                    samples,
+                    job_rank=i,
+                    job_world_size=len(gpu_actors),
+                )
+                for i, actor in enumerate(gpu_actors)
+            ]
+            worker_partials = ray.get(futures)
+            image = ray.get(gpu_actors[0].ray_vae_decode_temporal_combine.remote(worker_partials))
+            return (image,)
 
         futures = [
             actor.ray_vae_decode_partial.remote(
