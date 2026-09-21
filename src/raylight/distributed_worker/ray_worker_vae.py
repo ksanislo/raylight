@@ -296,6 +296,7 @@ def ray_vae_decode_temporal_combine_impl(worker, worker_partials):
     return ray_vae_decode_finalize_impl(worker, decoded)
 
 
+@torch.no_grad()
 def ray_vae_decode_partial_impl(worker, samples, tile_size, overlap=64, temporal_size=64, temporal_overlap=8, job_rank=0, job_world_size=1):
     import comfy.model_management as model_management
 
@@ -676,6 +677,7 @@ def seedvr2_spatial_tile_ranges(height, width, tile_size, overlap):
     return ranges, overlap
 
 
+@torch.no_grad()
 def ray_seedvr2_vae_decode_partial_impl(worker, samples, tile_size, overlap=64, job_rank=0, job_world_size=1):
     import comfy.model_management as model_management
     from comfy.ldm.seedvr.vae import VideoAutoencoderKLWrapper
@@ -803,6 +805,7 @@ def combine_seedvr2_vae_partials(worker_partials):
     return output / output_div
 
 
+@torch.no_grad()
 def ray_vae_decode_finalize_impl(worker, decoded):
     images = worker.vae_model.process_output(decoded).movedim(1, -1)
     if len(images.shape) == 5:
