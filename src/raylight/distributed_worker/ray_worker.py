@@ -1253,7 +1253,7 @@ class RayWorker:
     def ray_vae_decode_temporal_partial(self, samples, job_rank=0, job_world_size=1):
         return ray_vae_decode_temporal_partial_impl(self, samples, job_rank, job_world_size)
 
-    def ray_vae_decode_temporal_combine(self, worker_partials):
+    def ray_vae_decode_temporal_combine(self, *worker_partials):
         return ray_vae_decode_temporal_combine_impl(self, worker_partials)
 
     def ray_vae_decode_finalize(self, decoded):
