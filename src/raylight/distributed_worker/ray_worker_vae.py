@@ -119,6 +119,183 @@ def _compute_feather(upscale, overlap_latent, spatial_dims):
     return (feather_h, feather_w)
 
 
+_TEMPORAL_CHUNK_ATTRS = (
+    "_decode_temporal_chunks",
+    "_adaptive_decode",
+    "_finalize_pixels",
+    "decode_output_shape",
+    "blend",
+    "latents_mean",
+    "latents_std",
+    "tokens_chunk_size",
+    "token_overlap",
+    "token_drop",
+    "vae_ratio_t",
+    "frame_pre_padding",
+    "frame_overlap",
+)
+
+
+def temporal_chunk_model(vae):
+    # VAEs that decode as a sequence of independent temporal chunks expose the whole
+    # chunk plan; every chunk is a pure function of its latent slice, so the chunks can
+    # be spread over ranks and stitched afterwards.
+    model = getattr(vae, "first_stage_model", None)
+    if model is None:
+        return None
+    if not all(hasattr(model, name) for name in _TEMPORAL_CHUNK_ATTRS):
+        return None
+    return model
+
+
+def _normalize_latents(model, z):
+    latents_mean = model.latents_mean.view(1, -1, 1, 1, 1).to(z)
+    latents_std = model.latents_std.view(1, -1, 1, 1, 1).to(z)
+    return z * latents_std + latents_mean
+
+
+def ray_vae_decode_temporal_partial_impl(worker, samples, job_rank=0, job_world_size=1):
+    import comfy.model_management as model_management
+
+    _validate_job_rank(job_rank, job_world_size)
+
+    vae = worker.vae_model
+    model = temporal_chunk_model(vae)
+    if model is None:
+        raise ValueError("Distributed VAE (Ray) temporal decode requires a VAE that decodes in temporal chunks.")
+
+    latent = samples["samples"]
+    if _is_nested_tensor(latent):
+        raise ValueError(
+            "Distributed VAE (Ray) cannot decode structured/nested latents. "
+            "Use LTXVSeparateAVLatent to prepare latents, then use normal ComfyUI VAE Decode."
+        )
+    if latent.ndim != 5:
+        raise ValueError(f"Distributed VAE (Ray) temporal decode expects a 5D latent, got {latent.ndim}D.")
+
+    memory_used = vae.memory_used_decode(latent.shape, vae.vae_dtype)
+    model_management.load_models_gpu([vae.patcher], memory_required=memory_used, force_full_load=vae.disable_offload)
+
+    output_shape = tuple(model.decode_output_shape(latent.shape))
+
+    chunks = []
+    with model_management.cuda_device_context(vae.device), torch.no_grad():
+        z = _normalize_latents(model, latent.to(vae.device, dtype=vae.vae_dtype))
+        pad_tokens, num_chunks = model._decode_temporal_chunks(z.shape[2])
+        if pad_tokens > 0:
+            pad_z = z[:, :, -1:, :, :].repeat(1, 1, pad_tokens, 1, 1)
+            z = torch.cat([z, pad_z], dim=2)
+
+        for chunk_index in range(num_chunks):
+            if chunk_index % job_world_size != job_rank:
+                continue
+            t_start_idx = chunk_index * model.tokens_chunk_size
+            t_end_idx = t_start_idx + model.tokens_chunk_size + model.token_overlap
+            clip_dec = model._adaptive_decode(z[:, :, t_start_idx:t_end_idx, :, :])
+            chunks.append((chunk_index, clip_dec.to(device="cpu", copy=True)))
+
+    return {
+        "mode": "temporal",
+        "num_chunks": num_chunks,
+        "output_shape": output_shape,
+        "chunks": chunks,
+    }
+
+
+def _collect_temporal_chunks(worker_partials):
+    if not worker_partials:
+        raise ValueError("Distributed VAE decode received no worker results.")
+
+    num_chunks = None
+    output_shape = None
+    collected = {}
+
+    for i, worker_result in enumerate(worker_partials):
+        if not isinstance(worker_result, dict) or worker_result.get("mode") != "temporal":
+            raise ValueError(f"Distributed VAE decode worker {i} did not return a temporal partial.")
+        if num_chunks is None:
+            num_chunks = worker_result["num_chunks"]
+            output_shape = tuple(worker_result["output_shape"])
+        else:
+            if worker_result["num_chunks"] != num_chunks:
+                raise ValueError("Distributed VAE decode workers returned inconsistent chunk counts.")
+            if tuple(worker_result["output_shape"]) != output_shape:
+                raise ValueError("Distributed VAE decode workers returned different output shapes.")
+        for chunk_index, chunk in worker_result["chunks"]:
+            if chunk_index in collected:
+                raise ValueError(f"Distributed VAE decode received duplicate temporal chunk {chunk_index}.")
+            collected[chunk_index] = chunk
+
+    missing = [i for i in range(num_chunks) if i not in collected]
+    if missing:
+        raise ValueError(f"Distributed VAE decode is missing temporal chunk(s) {missing}.")
+
+    return output_shape, [collected[i] for i in range(num_chunks)]
+
+
+def combine_temporal_vae_chunks(model, device, output_shape, chunks):
+    chunk_dec = model.tokens_chunk_size * model.vae_ratio_t
+    split_count = int(model.token_drop > 0) + 1
+
+    dec = torch.empty(output_shape, dtype=torch.float32, device="cpu")
+    dec_overlap = None
+    write_pos = 0
+
+    def write_part(part):
+        nonlocal write_pos
+        part_frames = part.shape[2]
+        if part_frames <= 0:
+            return
+        part = model._finalize_pixels(part)
+        copy_frames = min(part_frames, max(0, dec.shape[2] - write_pos))
+        if copy_frames > 0:
+            dec[:, :, write_pos:write_pos + copy_frames, :, :].copy_(
+                part[:, :, :copy_frames, :, :]
+            )
+            write_pos += copy_frames
+
+    last_index = len(chunks) - 1
+    for chunk_index, chunk in enumerate(chunks):
+        clip_dec = chunk.to(device)
+        for j in range(split_count):
+            f_start_idx = j * chunk_dec
+            f_end_idx = min(f_start_idx + chunk_dec, clip_dec.shape[2])
+            clip_dec_chunk = clip_dec[:, :, f_start_idx:f_end_idx, :, :]
+            clip_dec_chunk = clip_dec_chunk[:, :, model.frame_pre_padding:, :, :]
+
+            if j == 0:
+                if dec_overlap is not None:
+                    clip_dec_chunk = model.blend(
+                        dec_overlap, clip_dec_chunk, model.frame_overlap, dim=-3
+                    )
+                    dec_overlap = None
+                write_part(clip_dec_chunk)
+            else:
+                dec_overlap = clip_dec_chunk.contiguous()
+
+        if chunk_index == last_index and dec_overlap is not None:
+            write_part(dec_overlap)
+            dec_overlap = None
+
+    return dec
+
+
+def ray_vae_decode_temporal_combine_impl(worker, worker_partials):
+    import comfy.model_management as model_management
+
+    vae = worker.vae_model
+    model = temporal_chunk_model(vae)
+    if model is None:
+        raise ValueError("Distributed VAE (Ray) temporal decode requires a VAE that decodes in temporal chunks.")
+
+    output_shape, chunks = _collect_temporal_chunks(worker_partials)
+
+    with model_management.cuda_device_context(vae.device), torch.no_grad():
+        decoded = combine_temporal_vae_chunks(model, vae.device, output_shape, chunks)
+
+    return ray_vae_decode_finalize_impl(worker, decoded)
+
+
 def ray_vae_decode_partial_impl(worker, samples, tile_size, overlap=64, temporal_size=64, temporal_overlap=8, job_rank=0, job_world_size=1):
     import comfy.model_management as model_management
 
