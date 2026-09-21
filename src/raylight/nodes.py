@@ -1781,8 +1781,9 @@ class RayVAEDecodeDistributed:
                 )
                 for i, actor in enumerate(gpu_actors)
             ]
-            worker_partials = ray.get(futures)
-            image = ray.get(gpu_actors[0].ray_vae_decode_temporal_combine.remote(worker_partials))
+            # passed as separate arguments so Ray resolves them on the combining worker;
+            # collecting them here first would copy every chunk through the driver
+            image = ray.get(gpu_actors[0].ray_vae_decode_temporal_combine.remote(*futures))
             return (image,)
 
         futures = [
