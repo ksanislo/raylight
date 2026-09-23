@@ -410,13 +410,19 @@ if hasattr(model_base, "MiniMaxH3"):
     @USPInjectRegistry.register(model_base.MiniMaxH3)
     def _inject_minimax_h3(model_patcher, base_model, *args):
         from ..comfy_dist.sd import FSDP_LORA_SIDECAR_ATTACHMENT
-        from ..diffusion_models.minimax.xdit_context_parallel import usp_attn_forward, usp_dit_forward, usp_mlp_forward
+        from ..diffusion_models.minimax.xdit_context_parallel import usp_attn_forward, usp_block_forward, usp_dit_forward, usp_mlp_forward
+
+        import os as _os
 
         model = base_model.diffusion_model
         sidecar_groups = model_patcher.get_attachment(FSDP_LORA_SIDECAR_ATTACHMENT) or {}
+        mlp_fp16 = _os.environ.get("RAYLIGHT_MLP_FP16") == "1"
+        block_fp32_residual = _os.environ.get("RAYLIGHT_FP32_RESIDUAL") == "1"
         for i, block in enumerate(model.blocks):
             block.attn.forward = types.MethodType(usp_attn_forward, block.attn)
-            if f"diffusion_model.blocks.{i}.mlp.fc2" in sidecar_groups:
+            if block_fp32_residual:
+                block.forward = types.MethodType(usp_block_forward, block)
+            if mlp_fp16 or f"diffusion_model.blocks.{i}.mlp.fc2" in sidecar_groups:
                 block.mlp.forward = types.MethodType(usp_mlp_forward, block.mlp)
         for i, block in enumerate(model.token_refiner.blocks):
             if f"diffusion_model.token_refiner.blocks.{i}.mlp.fc2" in sidecar_groups:

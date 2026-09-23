@@ -147,6 +147,12 @@ def _build_local_runtime_env(module_dir: Path, repo_root: Path, runtime_workdir:
     if alloc_conf is not None:
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = alloc_conf
 
+    # the fp16 branches are selected per worker, so the choice has to travel with them
+    for name in ("RAYLIGHT_ATTN_FP16", "RAYLIGHT_MLP_FP16", "RAYLIGHT_FP32_RESIDUAL"):
+        value = os.environ.get(name)
+        if value is not None:
+            env_vars[name] = value
+
     return {
         "py_modules": [str(module_dir)],
         "working_dir": str(runtime_workdir),

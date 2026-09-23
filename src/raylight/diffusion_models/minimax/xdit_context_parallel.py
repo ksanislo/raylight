@@ -1,8 +1,11 @@
+import os
+
 import torch
 
 import comfy
+
 from comfy_extras.nodes_minimax_h3 import MiniMaxH3FunControlBlockPatch
-from comfy.ldm.minimax.model import AUDIO_COND_TIMESTEP, VISUAL_COND_TIMESTEP, PackedLayout, mask_row_values, pack_audio, patchify_video, rope_rotation_table, time_shift_sigma, unpack_audio, unpatchify_video
+from comfy.ldm.minimax.model import _mod_gate, _mod_scale_shift, AUDIO_COND_TIMESTEP, VISUAL_COND_TIMESTEP, PackedLayout, mask_row_values, pack_audio, patchify_video, rope_rotation_table, time_shift_sigma, unpack_audio, unpatchify_video
 from xfuser.core.distributed import get_sequence_parallel_rank, get_sequence_parallel_world_size, get_sp_group
 
 import raylight.distributed_modules.attention as xfuser_attn
@@ -31,6 +34,24 @@ def _split_packed_sequence(h, rope_freqs, mod_segments):
     return h[start:end], rope_freqs[:, start:end], local_segments
 
 
+# Volta and Turing have fp16 tensor cores but no bf16, so the model runs in fp32
+# and attention dominates both activation memory and step time. The attention
+# branch is safe in fp16 while the residual stays fp32, except for out_proj:
+# its output peaks at 6.63e4 against fp16's 65504, so it is scaled by a power of
+# two (exact, both projections have bias=False) and unscaled in fp32. The scale
+# is applied in place on the fp16 tensor rather than on the fp32 value, so no
+# full size fp32 copy of the attention output is materialised.
+_ATTN_FP16_OUT_PROJ_SCALE = 64.0
+
+
+def _attn_fp16():
+    return os.environ.get("RAYLIGHT_ATTN_FP16") == "1"
+
+
+def _fp32_residual():
+    return os.environ.get("RAYLIGHT_FP32_RESIDUAL") == "1"
+
+
 def _run_control_patch(patch, args, block_wrap, full_size):
     local_size = args["img"].shape[0]
     with comfy.model_prefetch.pause_malloc_graph():
@@ -50,6 +71,7 @@ def _run_control_patch(patch, args, block_wrap, full_size):
 def usp_attn_forward(self, x, rope_freqs=None, transformer_options={}):
     if self.comfy_attention.function is not None:
         raise ValueError("Checkpoint-selected MiniMax H3 attention is not supported by Raylight USP")
+    fp16 = x.dtype == torch.float16
     s = x.shape[0]
     q, k, v = self.qkv_proj(x).split(self.heads * self.head_dim, dim=-1)
     v = v.view(s, self.heads, self.head_dim)
@@ -75,12 +97,57 @@ def usp_attn_forward(self, x, rope_freqs=None, transformer_options={}):
     k = k.transpose(0, 1).unsqueeze(0)
     v = v.transpose(0, 1).unsqueeze(0)
     out = xfuser_optimized_attention(q, k, v, self.heads, skip_reshape=True, transformer_options=transformer_options)
-    return self.out_proj(out.squeeze(0))
+    out = out.squeeze(0)
+    if fp16:
+        if out.dtype != torch.float16:
+            out = out.to(torch.float16)
+        out = out.div_(_ATTN_FP16_OUT_PROJ_SCALE)
+        return self.out_proj(out).to(torch.float32).mul_(_ATTN_FP16_OUT_PROJ_SCALE)
+    return self.out_proj(out)
+
+
+# Off by default so output stays byte-identical to the single-pass path.
+# Recommended value when activation memory is the constraint: 4096, which on a
+# 16 GiB card freed 2.7 GiB for 1 second of wall clock on a 124 frame render.
+# Enabling it changes which sample a seed produces (see the commit message).
+_MLP_FP16_FC2_SCALE = 256.0
+
+
+def _mlp_fp16():
+    return os.environ.get("RAYLIGHT_MLP_FP16") == "1"
+
+
+def usp_block_forward(self, x, t_emb, mod_segments, rope_freqs, transformer_options={}, attention=None):
+    """DiT block that accumulates the residual in fp32 while the branches run in fp16.
+
+    Loading the model in fp16 halves every activation, but the residual stream
+    reaches ~1e7 across the 50 blocks, far past fp16's 65504. The branch outputs
+    arrive already unscaled from usp_attn_forward and usp_mlp_forward.
+    """
+    attention = self.attn if attention is None else attention
+    sh_a, sc_a, g_a, sh_m, sc_m, g_m = self.adaln_proj(t_emb)
+    h = _mod_scale_shift(self.norm1(x), sh_a, sc_a, mod_segments)
+    if _attn_fp16():
+        h = h.to(torch.float16)
+    att = attention(h, rope_freqs=rope_freqs, transformer_options=transformer_options)
+    x = _mod_gate(x, g_a, att.to(x.dtype), mod_segments)
+    h = _mod_scale_shift(self.norm2(x), sh_m, sc_m, mod_segments)
+    if _mlp_fp16():
+        h = h.to(torch.float16)
+    return _mod_gate(x, g_m, self.mlp(h).to(x.dtype), mod_segments)
 
 
 def usp_mlp_forward(self, x):
+    # fc2's output overflows fp16 by ~56x (measured peak 3.69e6 against 65504), so its
+    # input is scaled by a power of two before the projection and unscaled in fp32
+    # afterwards. The swiglu itself is evaluated in fp32: it is pointwise and not
+    # exactly representable, and it is cheap relative to the projections.
     gate, up = self.fc1(x).chunk(2, dim=-1)
-    return self.fc2(torch.nn.functional.silu(gate).mul_(up))
+    if x.dtype != torch.float16:
+        return self.fc2(torch.nn.functional.silu(gate).mul_(up))
+    s = torch.nn.functional.silu(gate.to(torch.float32)).mul_(up.to(torch.float32))
+    s = s.div_(_MLP_FP16_FC2_SCALE).to(torch.float16)
+    return self.fc2(s).to(torch.float32).mul_(_MLP_FP16_FC2_SCALE)
 
 
 def usp_dit_forward(self, x, timestep, context, transformer_options={}, minimax_payload=None, denoise_mask=None, audio_denoise_mask=None, **kwargs):
@@ -92,6 +159,7 @@ def usp_dit_forward(self, x, timestep, context, transformer_options={}, minimax_
     payload = minimax_payload or {}
     device = video_x.device
     dtype = context.dtype  # compute dtype
+
 
     latent_t, lat_h, lat_w = video_x.shape[2], video_x.shape[3], video_x.shape[4]
     audio_t = audio_x.shape[-1]
@@ -184,12 +252,12 @@ def usp_dit_forward(self, x, timestep, context, transformer_options={}, minimax_
 
     all_video_rows = video_rows
     if cond_video_rows is not None:
-        all_video_rows = torch.empty(img_update.shape[0], video_rows.shape[1], dtype=torch.float32, device=device)
+        all_video_rows = torch.zeros(img_update.shape[0], video_rows.shape[1], dtype=torch.float32, device=device)
         all_video_rows[~img_update] = cond_video_rows
         all_video_rows[img_update] = video_rows
     all_audio_rows = audio_rows
     if cond_audio_rows is not None:
-        all_audio_rows = torch.empty(audio_update.shape[0], audio_rows.shape[1], dtype=torch.float32, device=device)
+        all_audio_rows = torch.zeros(audio_update.shape[0], audio_rows.shape[1], dtype=torch.float32, device=device)
         all_audio_rows[~audio_update] = cond_audio_rows
         all_audio_rows[audio_update] = audio_rows
 
@@ -197,11 +265,20 @@ def usp_dit_forward(self, x, timestep, context, transformer_options={}, minimax_
     audio_embed = self.audio_patch_proj(all_audio_rows).to(dtype)
     text_states = context[0]
     if text_states.shape[-1] != self.hidden_size:
-        text_states = self.token_refiner(self.condition_proj(text_states),
-                                         transformer_options=transformer_options)
+        # The refiner and condition_proj are unquantized, so on a card without
+        # bf16 they are held in fp32 for the whole render while only being used
+        # here. Keep them in fp16 and convert at the boundary.
+        # condition_proj sees Qwen3-VL hidden states that project to ~96k, past
+        # fp16's range, so it runs in fp32 regardless of the model dtype.
+        text_states = self.token_refiner(self.condition_proj(text_states.to(torch.float32)),
+                                         transformer_options=transformer_options).to(dtype)
 
     # segments are contiguous: assemble by slices, embed rows follow segment order
-    h = torch.empty(layout.seq_len, self.hidden_size, dtype=dtype, device=device)
+    # zeros, not empty: the segment loop below does not necessarily cover every
+    # row (the sequence is padded to the world size), and an uninitialised row
+    # is far more likely to hold a NaN bit pattern in fp16 than in fp32.
+    residual_dtype = torch.float32 if _fp32_residual() else dtype
+    h = torch.zeros(layout.seq_len, self.hidden_size, dtype=residual_dtype, device=device)
     voff = aoff = 0
     for a, b, kind in layout.segments:
         n = b - a
