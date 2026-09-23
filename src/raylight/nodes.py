@@ -187,6 +187,37 @@ def _add_nvrtc_library_path(env_vars: dict[str, str]):
     env_vars["LD_LIBRARY_PATH"] = os.pathsep.join(dict.fromkeys(dirs))
 
 
+# Knobs a worker reads from its environment. They are forwarded from the host so a
+# server-wide setting still works, and RayWorkerOptions can override any of them per
+# workflow without a restart.
+_WORKER_ENV_KNOBS = (
+    "RAYLIGHT_ATTN_FP16",
+    "RAYLIGHT_MLP_FP16",
+    "RAYLIGHT_FP32_RESIDUAL",
+    "RAYLIGHT_MLP_CHUNK_TOKENS",
+    "RAYLIGHT_NUMA_BIND",
+    "RAYLIGHT_LORA_BYPASS",
+    "RAYLIGHT_WORKER_NO_AIMDO",
+)
+
+
+def _apply_worker_options(env_vars, options):
+    """Fold RayWorkerOptions into the worker environment.
+
+    Every option defaults to "auto", which leaves whatever the host was started with,
+    so a workflow that does not carry the node behaves exactly as before.
+    """
+    if not options:
+        return
+    for name, value in options.items():
+        if name not in _WORKER_ENV_KNOBS:
+            continue
+        if value is None:
+            continue
+        env_vars[name] = value
+        logging.info("[Raylight] worker option %s=%s", name, value)
+
+
 def _build_local_runtime_env(module_dir: Path, repo_root: Path, runtime_workdir: Path):
     python_path_entries = [str(repo_root)]
     existing = os.environ.get("PYTHONPATH")
@@ -199,21 +230,10 @@ def _build_local_runtime_env(module_dir: Path, repo_root: Path, runtime_workdir:
         "COMFYUI_BASE_DIRECTORY": str(repo_root),
     }
     _add_nvrtc_library_path(env_vars)
-    mlp_chunk = os.environ.get("RAYLIGHT_MLP_CHUNK_TOKENS")
-    if mlp_chunk is not None:
-        env_vars["RAYLIGHT_MLP_CHUNK_TOKENS"] = mlp_chunk
-    for _name in (
-        "RAYLIGHT_MLP_FP16",
-        "RAYLIGHT_FP32_RESIDUAL",
-        "RAYLIGHT_NUMA_BIND",
-        "RAYLIGHT_LORA_BYPASS",
-    ):
+    for _name in _WORKER_ENV_KNOBS:
         _val = os.environ.get(_name)
         if _val is not None:
             env_vars[_name] = _val
-    attn_fp16 = os.environ.get("RAYLIGHT_ATTN_FP16")
-    if attn_fp16 is not None:
-        env_vars["RAYLIGHT_ATTN_FP16"] = attn_fp16
     alloc_conf = _sanitized_worker_alloc_conf()
     if alloc_conf is not None:
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = alloc_conf
@@ -627,6 +647,7 @@ class RayInitializer:
         worker_vram_headroom: float = -1.0,
         worker_reserve_vram: float = -1.0,
         pin_ranks_to_gpus: bool = False,
+        worker_options=None,
     ):
         # THIS IS PYTORCH DIST ADDRESS
         # (TODO) Change so it can be use in cluster of nodes. but it is long waaaaay down in the priority list
@@ -751,6 +772,8 @@ class RayInitializer:
             # Adapted from avtc's Ray GPU visibility restriction idea.
             runtime_env_base.setdefault("env_vars", {})["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_idx) for gpu_idx in selected_gpus)
 
+        _apply_worker_options(runtime_env_base.setdefault("env_vars", {}), worker_options)
+
         # -1 keeps whatever the host was started with. The host holds the text
         # encoder and VAE, so the budgets that suit it are not the ones that
         # suit a worker holding only the diffusion model.
@@ -815,6 +838,105 @@ class RayInitializer:
         ray_actor_fn = make_ray_actor_fn(world_size, self.parallel_dict)
         ray_actors = ray_actor_fn()
         return ([ray_actors, ray_actor_fn],)
+
+
+
+class RayWorkerOptions:
+    """Per-workflow overrides for the knobs a worker reads from its environment.
+
+    These used to be settable only as server-wide environment variables, which meant a
+    restart to change one and the same value for every workflow. Kept off
+    RayInitializerAdvanced so its panel stays readable; plug this into its
+    `worker_options` input when you need something other than the server default.
+    """
+
+    TRI = ["auto", "on", "off"]
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "numa_bind": (
+                    s.TRI,
+                    {"display_name": "NUMA: bind worker to its GPU's node",
+                     "default": "auto",
+                     "tooltip": "Pin each worker's CPUs and memory to the NUMA node its GPU hangs off. Worth it when GPUs span sockets. `auto` keeps the server setting (RAYLIGHT_NUMA_BIND).",
+                     },
+                ),
+                "attention_fp16": (
+                    s.TRI,
+                    {"display_name": "MiniMax H3: fp16 attention",
+                     "default": "auto",
+                     "tooltip": "Run the attention branch in fp16 while the residual stays fp32. `auto` keeps the server setting (RAYLIGHT_ATTN_FP16).",
+                     },
+                ),
+                "mlp_fp16": (
+                    s.TRI,
+                    {"display_name": "MiniMax H3: fp16 MLP",
+                     "default": "auto",
+                     "tooltip": "Run the MLP branch in fp16 with the fc2 rescale. `auto` keeps the server setting (RAYLIGHT_MLP_FP16).",
+                     },
+                ),
+                "fp32_residual": (
+                    s.TRI,
+                    {"display_name": "MiniMax H3: fp32 residual",
+                     "default": "auto",
+                     "tooltip": "Accumulate the residual stream in fp32. The residual reaches ~1e7 across 50 blocks, far past fp16's range. `auto` keeps the server setting.",
+                     },
+                ),
+                "mlp_chunk_tokens": (
+                    "INT",
+                    {"display_name": "MLP chunk tokens (-1 = server default)",
+                     "default": -1,
+                     "min": -1,
+                     "max": 65536,
+                     "step": 512,
+                     "tooltip": "Slice the MLP along tokens to bound activation memory. 0 disables chunking. Changing it changes which sample a seed produces. -1 keeps the server setting (RAYLIGHT_MLP_CHUNK_TOKENS).",
+                     },
+                ),
+                "lora_bypass": (
+                    ["auto", "default", "resident", "pinned"],
+                    {"display_name": "LoRA bypass operand placement",
+                     "default": "auto",
+                     "tooltip": "Where the LoRA bypass keeps its operands. `resident` holds them on the card, `pinned` in pinned host memory. `auto` keeps the server setting (RAYLIGHT_LORA_BYPASS).",
+                     },
+                ),
+                "worker_dynamic_vram": (
+                    s.TRI,
+                    {"display_name": "Worker DynamicVRAM (aimdo)",
+                     "default": "auto",
+                     "tooltip": "Let aimdo manage worker VRAM. Turning it off makes worker VRAM worse, not better, so leave this alone unless you are testing. `auto` keeps the server setting.",
+                     },
+                ),
+            }
+        }
+
+    RETURN_TYPES = ("RAY_WORKER_OPTIONS",)
+    RETURN_NAMES = ("worker_options",)
+    FUNCTION = "build"
+    CATEGORY = "Raylight"
+
+    def build(self, numa_bind, attention_fp16, mlp_fp16, fp32_residual,
+              mlp_chunk_tokens, lora_bypass, worker_dynamic_vram):
+        def flag(value):
+            # auto leaves the host environment untouched
+            return None if value == "auto" else ("1" if value == "on" else "0")
+
+        options = {
+            "RAYLIGHT_NUMA_BIND": flag(numa_bind),
+            "RAYLIGHT_ATTN_FP16": flag(attention_fp16),
+            "RAYLIGHT_MLP_FP16": flag(mlp_fp16),
+            "RAYLIGHT_FP32_RESIDUAL": flag(fp32_residual),
+            # the worker knob is phrased as a disable, so it is the inverse
+            "RAYLIGHT_WORKER_NO_AIMDO": None if worker_dynamic_vram == "auto"
+            else ("0" if worker_dynamic_vram == "on" else "1"),
+        }
+        if mlp_chunk_tokens >= 0:
+            options["RAYLIGHT_MLP_CHUNK_TOKENS"] = str(mlp_chunk_tokens)
+        if lora_bypass != "auto":
+            # `default` means the plain path, which the worker reads as an unset value
+            options["RAYLIGHT_LORA_BYPASS"] = "" if lora_bypass == "default" else lora_bypass
+        return ({k: v for k, v in options.items() if v is not None},)
 
 
 class RayInitializerAdvanced(RayInitializer):
@@ -947,6 +1069,10 @@ class RayInitializerAdvanced(RayInitializer):
                         "default": False,
                         "tooltip": "Give rank i the i-th GPU listed in GPU indices instead of letting Ray choose. Collective groups are built from rank order, so on a multi socket box this decides whether an all-to-all stays on one node. Needs GPU indices to be set.",
                     },
+                ),
+                "worker_options": (
+                    "RAY_WORKER_OPTIONS",
+                    {"tooltip": "Optional RayWorkerOptions node, for the worker knobs that otherwise only exist as server-wide environment variables."},
                 ),
             },
         }
@@ -2115,6 +2241,7 @@ NODE_CLASS_MAPPINGS = {
     "DPNoiseList": DPNoiseList,
     "DPConditioningList": DPConditioningList,
     "DPLatentList": DPLatentList,
+    "RayWorkerOptions": RayWorkerOptions,
     "RayVAEDecodeDistributed": RayVAEDecodeDistributed,
     "RaySeedVR2VAEDecodeDistributed": RaySeedVR2VAEDecodeDistributed,
 }
@@ -2136,6 +2263,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "DPNoiseList": "Data Parallel Noise List",
     "DPConditioningList": "Data Parallel Conditioning List",
     "DPLatentList": "Data Parallel Latent List",
+    "RayWorkerOptions": "Ray Worker Options",
     "RayVAEDecodeDistributed": "Distributed VAE (Ray)",
     "RaySeedVR2VAEDecodeDistributed": "SeedVR2 VAE Decode Distributed (Ray)",
 }
