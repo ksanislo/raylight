@@ -2,8 +2,10 @@ import raylight
 import os
 import gc
 import json
+import logging
 import shutil
 import tempfile
+import time
 from typing import Any
 from pathlib import Path
 from copy import deepcopy
@@ -152,6 +154,44 @@ def _build_local_runtime_env(module_dir: Path, repo_root: Path, runtime_workdir:
         "working_dir": str(runtime_workdir),
         "env_vars": env_vars,
     }
+
+
+def _ray_worker_pids():
+    """PIDs of Ray actor processes still alive, by their setproctitle name."""
+    pids = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open("/proc/{}/cmdline".format(entry), "rb") as fh:
+                cmdline = fh.read()
+        except OSError:
+            continue
+        if b"ray::" in cmdline:
+            pids.append(int(entry))
+    return pids
+
+
+def _wait_for_ray_workers_to_exit(timeout=90.0):
+    """Wait for the previous actors to actually go away.
+
+    ray.shutdown() returns before the worker processes have finished tearing down
+    their CUDA contexts. Spawning the next set while the old ones still hold a
+    device leaves two processes creating and destroying contexts on the same GPU at
+    once, which is a great deal of driver churn for no reason.
+    """
+    deadline = time.time() + timeout
+    remaining = _ray_worker_pids()
+    if not remaining:
+        return True
+    logging.info("[Raylight] waiting for %d ray worker(s) to exit", len(remaining))
+    while time.time() < deadline:
+        remaining = _ray_worker_pids()
+        if not remaining:
+            return True
+        time.sleep(0.5)
+    logging.warning("[Raylight] ray workers %s still present after %.0fs, continuing", remaining, timeout)
+    return False
 
 
 def _worker_cli_args_env_json() -> str:
@@ -481,6 +521,7 @@ class RayInitializer:
         ray_object_store_gb: float = 2.0,
         ray_dashboard_address: str = "None",
         torch_dist_address: str = "None",
+        pin_ranks_to_gpus: bool = False,
     ):
         # THIS IS PYTORCH DIST ADDRESS
         # (TODO) Change so it can be use in cluster of nodes. but it is long waaaaay down in the priority list
@@ -542,6 +583,17 @@ class RayInitializer:
         self.parallel_dict["pp_degree"] = 1
         self.parallel_dict["dp_degree"] = dp_degree if dp_degree >= 1 else 1
         self.parallel_dict["clear_vram_after_sampling"] = clear_vram_after_sampling
+        if pin_ranks_to_gpus:
+            if not selected_gpus:
+                raise ValueError("pin_ranks_to_gpus needs GPU_SELECT to list the GPUs to use, e.g. 0,1,2,3")
+            if len(selected_gpus) < world_size:
+                raise ValueError(
+                    f"pin_ranks_to_gpus needs at least {world_size} GPU indices, got {len(selected_gpus)}"
+                )
+            self.parallel_dict["gpu_pin_order"] = list(selected_gpus)
+            logging.info("[Raylight] pinning rank i -> GPU %s", list(selected_gpus[:world_size]))
+        # Lets the sampler tell whether workers can reach the host's card.
+        self.parallel_dict["selected_gpus"] = list(selected_gpus) if selected_gpus else None
         _reset_pipefusion_runtime_config(self.parallel_dict)
 
         if ulysses_degree > 0 or ring_degree > 0 or cfg_degree > 0:
@@ -602,6 +654,7 @@ class RayInitializer:
         try:
             # Shut down so if comfy user try another workflow it will not cause error
             ray.shutdown()
+            _wait_for_ray_workers_to_exit()
             _cleanup_ray_temp()
             RayControlNetLoader._current_controlnet_path = None
             original_cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
@@ -671,6 +724,13 @@ class RayInitializerAdvanced(RayInitializer):
                     {
                         "default": "",
                         "tooltip": "GPU indices for Ray workers. Use comma separated values like 0,1,2 to limit Ray to those GPUs, or leave empty to use all visible GPUs. Useful if you want to reserve GPU 0 for CLIP or VAE.",
+                    },
+                ),
+                "pin_ranks_to_gpus": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Give rank i the i-th GPU listed in GPU indices instead of letting Ray choose. Collective groups are built from rank order, so on a multi socket box this decides whether an all-to-all stays on one node. Needs GPU indices to be set.",
                     },
                 ),
                 "ulysses_degree": (
