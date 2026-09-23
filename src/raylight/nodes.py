@@ -197,7 +197,6 @@ _WORKER_ENV_KNOBS = (
     "RAYLIGHT_MLP_CHUNK_TOKENS",
     "RAYLIGHT_NUMA_BIND",
     "RAYLIGHT_LORA_BYPASS",
-    "RAYLIGHT_WORKER_NO_AIMDO",
 )
 
 
@@ -316,7 +315,7 @@ def _worker_cli_args_env_json(overrides: dict[str, Any] | None = None) -> str:
         "mmap_torch_files": bool(comfy_args.mmap_torch_files),
         "disable_smart_memory": bool(comfy_args.disable_smart_memory),
         "disable_async_offload": bool(comfy_args.disable_async_offload),
-        "disable_dynamic_vram": bool(comfy_args.disable_dynamic_vram) or os.environ.get("RAYLIGHT_WORKER_NO_AIMDO") == "1",
+        "disable_dynamic_vram": bool(comfy_args.disable_dynamic_vram),
         "enable_dynamic_vram": bool(comfy_args.enable_dynamic_vram),
         "vram_headroom": _worker_float_override("RAYLIGHT_WORKER_VRAM_HEADROOM",
                                                comfy_args.vram_headroom),
@@ -901,13 +900,6 @@ class RayWorkerOptions:
                      "tooltip": "Where the LoRA bypass keeps its operands. `resident` holds them on the card, `pinned` in pinned host memory. `auto` keeps the server setting (RAYLIGHT_LORA_BYPASS).",
                      },
                 ),
-                "worker_dynamic_vram": (
-                    s.TRI,
-                    {"display_name": "Worker DynamicVRAM (aimdo)",
-                     "default": "auto",
-                     "tooltip": "Let aimdo manage worker VRAM. Turning it off makes worker VRAM worse, not better, so leave this alone unless you are testing. `auto` keeps the server setting.",
-                     },
-                ),
             }
         }
 
@@ -917,7 +909,7 @@ class RayWorkerOptions:
     CATEGORY = "Raylight"
 
     def build(self, numa_bind, attention_fp16, mlp_fp16, fp32_residual,
-              mlp_chunk_tokens, lora_bypass, worker_dynamic_vram):
+              mlp_chunk_tokens, lora_bypass):
         def flag(value):
             # auto leaves the host environment untouched
             return None if value == "auto" else ("1" if value == "on" else "0")
@@ -927,9 +919,6 @@ class RayWorkerOptions:
             "RAYLIGHT_ATTN_FP16": flag(attention_fp16),
             "RAYLIGHT_MLP_FP16": flag(mlp_fp16),
             "RAYLIGHT_FP32_RESIDUAL": flag(fp32_residual),
-            # the worker knob is phrased as a disable, so it is the inverse
-            "RAYLIGHT_WORKER_NO_AIMDO": None if worker_dynamic_vram == "auto"
-            else ("0" if worker_dynamic_vram == "on" else "1"),
         }
         if mlp_chunk_tokens >= 0:
             options["RAYLIGHT_MLP_CHUNK_TOKENS"] = str(mlp_chunk_tokens)
