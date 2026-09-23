@@ -1469,6 +1469,23 @@ def make_ray_actor_fn(world_size, parallel_dict):
     num_replicas = parallel_dict.get("dp_degree", 1)
     shard_size = parallel_dict.get("shard_size", world_size)
     use_group_process_group = bool(parallel_dict.get("use_group_process_group"))
+    # With num_gpus=1 Ray picks the card and overwrites CUDA_VISIBLE_DEVICES, so rank
+    # order and PCI order need not agree. The collective groups are built from rank
+    # order, so on a multi socket box that decides whether an all-to-all stays on one
+    # node or crosses the interconnect. Claiming no GPU and naming the device instead
+    # makes rank i land on gpu_pin_order[i].
+    gpu_pin_order = parallel_dict.get("gpu_pin_order")
+
+    def _actor_options(rank, name):
+        options = {"name": name}
+        if gpu_pin_order:
+            options["num_gpus"] = 0
+            options["runtime_env"] = {
+                "env_vars": {"CUDA_VISIBLE_DEVICES": str(gpu_pin_order[rank % len(gpu_pin_order)])}
+            }
+        else:
+            options["num_gpus"] = 1
+        return options
 
     def _init_ray_actor(world_size=world_size, parallel_dict=parallel_dict):
         ray_actors = dict()
@@ -1479,7 +1496,7 @@ def make_ray_actor_fn(world_size, parallel_dict):
             # XDiT DP stays in one global group; xFuser derives DP ranks internally.
             for local_rank in range(world_size):
                 gpu_actors.append(
-                    gpu_actor.options(num_gpus=1, name=f"RayWorker:{local_rank}").remote(
+                    gpu_actor.options(**_actor_options(local_rank, f"RayWorker:{local_rank}")).remote(
                         local_rank=local_rank,
                         device_id=0,
                         parallel_dict=parallel_dict,
@@ -1495,8 +1512,8 @@ def make_ray_actor_fn(world_size, parallel_dict):
                 for local_rank in range(shard_size):
                     gpu_actors.append(
                         gpu_actor.options(
-                            num_gpus=1,
-                            name=f"RayWorker:{group_id}_{local_rank}"
+                            **_actor_options(group_id * shard_size + local_rank,
+                                             f"RayWorker:{group_id}_{local_rank}")
                         ).remote(
                             local_rank=local_rank,
                             device_id=0,
