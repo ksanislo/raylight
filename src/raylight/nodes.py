@@ -1014,6 +1014,13 @@ class RayInitializerAdvanced(RayInitializer):
                 ),
             },
             "optional": {
+                "pin_ranks_to_gpus": (
+                    "BOOLEAN",
+                    {"display_name": "Pin ranks to GPU order",
+                        "default": False,
+                        "tooltip": "Give rank i the i-th GPU listed in GPU indices instead of letting Ray choose. Collective groups are built from rank order, so on a multi socket box this decides whether an all-to-all stays on one node. Needs GPU indices to be set.",
+                    },
+                ),
                 "ray_object_store_gb": (
                     "FLOAT",
                     {"display_name": "Ray object store (GB)", 
@@ -1050,13 +1057,6 @@ class RayInitializerAdvanced(RayInitializer):
                         "max": 64.0,
                         "step": 0.5,
                         "tooltip": "GB each worker reserves, overriding the server's --reserve-vram. This is what decides how much of a sharded model gets pulled back onto the card, so raising it keeps FSDP shards on the host. -1 keeps the server setting.",
-                    },
-                ),
-                "pin_ranks_to_gpus": (
-                    "BOOLEAN",
-                    {"display_name": "Pin ranks to GPU order",
-                        "default": False,
-                        "tooltip": "Give rank i the i-th GPU listed in GPU indices instead of letting Ray choose. Collective groups are built from rank order, so on a multi socket box this decides whether an all-to-all stays on one node. Needs GPU indices to be set.",
                     },
                 ),
                 "worker_options": (
