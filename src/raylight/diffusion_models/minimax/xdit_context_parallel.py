@@ -47,10 +47,12 @@ def _attn_fp16():
     return os.environ.get("RAYLIGHT_ATTN_FP16") == "1"
 
 
+def _fp32_residual():
+    return os.environ.get("RAYLIGHT_FP32_RESIDUAL") == "1"
+
+
 def usp_attn_forward(self, x, rope_freqs=None, transformer_options={}):
-    fp16 = _attn_fp16() and x.dtype == torch.float32
-    if fp16:
-        x = x.to(torch.float16)
+    fp16 = x.dtype == torch.float16
     s = x.shape[0]
     q, k, v = self.qkv_proj(x).split(self.heads * self.head_dim, dim=-1)
     v = v.view(s, self.heads, self.head_dim)
@@ -124,15 +126,16 @@ def usp_block_forward(self, x, t_emb, mod_segments, rope_freqs, transformer_opti
     arrive already unscaled from usp_attn_forward and usp_mlp_forward.
     """
     attention = self.attn if attention is None else attention
-    if x.dtype is not torch.float32:
-        x = x.to(torch.float32)
     sh_a, sc_a, g_a, sh_m, sc_m, g_m = self.adaln_proj(t_emb)
     h = _mod_scale_shift(self.norm1(x), sh_a, sc_a, mod_segments)
+    if _attn_fp16():
+        h = h.to(torch.float16)
     att = attention(h, rope_freqs=rope_freqs, transformer_options=transformer_options)
-    x = _mod_gate(x, g_a, att.to(torch.float32), mod_segments)
+    x = _mod_gate(x, g_a, att.to(x.dtype), mod_segments)
     h = _mod_scale_shift(self.norm2(x), sh_m, sc_m, mod_segments)
-    m = self.mlp(h)
-    return _mod_gate(x, g_m, m.to(torch.float32), mod_segments)
+    if _mlp_fp16():
+        h = h.to(torch.float16)
+    return _mod_gate(x, g_m, self.mlp(h).to(x.dtype), mod_segments)
 
 
 def usp_mlp_forward(self, x):
@@ -141,9 +144,7 @@ def usp_mlp_forward(self, x):
     # which dominates activation memory on long sequences. Slicing the token
     # dimension bounds both to the chunk while leaving the result identical.
     chunk = _mlp_chunk_tokens()
-    fp16 = _mlp_fp16()
-    if fp16 and x.dtype is torch.float32:
-        x = x.to(torch.float16)
+    fp16 = x.dtype == torch.float16
     if chunk <= 0 or x.shape[0] <= chunk:
         return _mlp_branch(self, x, fp16)
 
@@ -283,7 +284,8 @@ def usp_dit_forward(self, x, timestep, context, transformer_options={}, minimax_
     # zeros, not empty: the segment loop below does not necessarily cover every
     # row (the sequence is padded to the world size), and an uninitialised row
     # is far more likely to hold a NaN bit pattern in fp16 than in fp32.
-    h = torch.zeros(layout.seq_len, self.hidden_size, dtype=dtype, device=device)
+    residual_dtype = torch.float32 if _fp32_residual() else dtype
+    h = torch.zeros(layout.seq_len, self.hidden_size, dtype=residual_dtype, device=device)
     voff = aoff = 0
     for a, b, kind in layout.segments:
         n = b - a
