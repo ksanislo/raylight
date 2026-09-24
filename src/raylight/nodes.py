@@ -208,7 +208,7 @@ def _build_local_runtime_env(module_dir: Path, repo_root: Path, runtime_workdir:
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = alloc_conf
 
     # the fp16 branches are selected per worker, so the choice has to travel with them
-    for name in ("RAYLIGHT_ATTN_FP16", "RAYLIGHT_MLP_FP16", "RAYLIGHT_FP32_RESIDUAL"):
+    for name in _WORKER_ENV_KNOBS:
         value = os.environ.get(name)
         if value is not None:
             env_vars[name] = value
@@ -224,6 +224,9 @@ def _build_local_runtime_env(module_dir: Path, repo_root: Path, runtime_workdir:
 # server-wide setting still works, and RayWorkerOptions can override any of them per
 # workflow without a restart.
 _WORKER_ENV_KNOBS = (
+    "RAYLIGHT_ATTN_FP16",
+    "RAYLIGHT_MLP_FP16",
+    "RAYLIGHT_FP32_RESIDUAL",
     "RAYLIGHT_MLP_CHUNK_TOKENS",
 )
 
@@ -2032,6 +2035,27 @@ class RayWorkerOptions:
     def INPUT_TYPES(s):
         return {
             "required": {
+                "attention_fp16": (
+                    s.TRI,
+                    {"display_name": "MiniMax H3: fp16 attention",
+                     "default": "auto",
+                     "tooltip": "Run the attention branch in fp16 while the residual stays fp32. `auto` keeps the server setting (RAYLIGHT_ATTN_FP16).",
+                     },
+                ),
+                "mlp_fp16": (
+                    s.TRI,
+                    {"display_name": "MiniMax H3: fp16 MLP",
+                     "default": "auto",
+                     "tooltip": "Run the MLP branch in fp16 with the fc2 rescale. `auto` keeps the server setting (RAYLIGHT_MLP_FP16).",
+                     },
+                ),
+                "fp32_residual": (
+                    s.TRI,
+                    {"display_name": "MiniMax H3: fp32 residual",
+                     "default": "auto",
+                     "tooltip": "Accumulate the residual stream in fp32. The residual reaches ~1e7 across 50 blocks, far past fp16's range. `auto` keeps the server setting (RAYLIGHT_FP32_RESIDUAL).",
+                     },
+                ),
                 "mlp_chunk_tokens": (
                     "INT",
                     {"display_name": "MLP chunk tokens (-1 = server default)",
@@ -2050,11 +2074,19 @@ class RayWorkerOptions:
     FUNCTION = "build"
     CATEGORY = "Raylight"
 
-    def build(self, mlp_chunk_tokens):
-        options = {}
+    def build(self, attention_fp16, mlp_fp16, fp32_residual, mlp_chunk_tokens):
+        def flag(value):
+            # auto leaves the host environment untouched
+            return None if value == "auto" else ("1" if value == "on" else "0")
+
+        options = {
+            "RAYLIGHT_ATTN_FP16": flag(attention_fp16),
+            "RAYLIGHT_MLP_FP16": flag(mlp_fp16),
+            "RAYLIGHT_FP32_RESIDUAL": flag(fp32_residual),
+        }
         if mlp_chunk_tokens >= 0:
             options["RAYLIGHT_MLP_CHUNK_TOKENS"] = str(mlp_chunk_tokens)
-        return (options,)
+        return ({k: v for k, v in options.items() if v is not None},)
 
 NODE_CLASS_MAPPINGS = {
     "RayWorkerOptions": RayWorkerOptions,
