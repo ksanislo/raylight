@@ -429,7 +429,6 @@ if hasattr(model_base, "MiniMaxH3"):
             if f"diffusion_model.token_refiner.blocks.{i}.mlp.fc2" in sidecar_groups:
                 block.mlp.forward = types.MethodType(usp_mlp_forward, block.mlp)
         model._forward = types.MethodType(usp_dit_forward, model)
-        import os as _os
 
 
 if hasattr(model_base, "JoyImage"):
