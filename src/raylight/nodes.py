@@ -952,6 +952,13 @@ class RayInitializerAdvanced(RayInitializer):
                         "tooltip": "GPU indices for Ray workers. Use comma separated values like 0,1,2 to limit Ray to those GPUs, or leave empty to use all visible GPUs. Useful if you want to reserve GPU 0 for CLIP or VAE.",
                     },
                 ),
+                "pin_ranks_to_gpus": (
+                    "BOOLEAN",
+                    {"display_name": "Pin ranks to GPU order",
+                        "default": False,
+                        "tooltip": "Give rank i the i-th GPU listed in GPU indices instead of letting Ray choose. Collective groups are built from rank order, so on a multi socket box this decides whether an all-to-all stays on one node. Needs GPU indices to be set.",
+                    },
+                ),
                 "ulysses_degree": (
                     "INT",
                     {"display_name": "Ulysses degree", "default": 2, "tooltip": "Sequence parallel degree for Ulysses. Set above 1 to split sequence work across GPUs."},
@@ -1014,13 +1021,6 @@ class RayInitializerAdvanced(RayInitializer):
                 ),
             },
             "optional": {
-                "pin_ranks_to_gpus": (
-                    "BOOLEAN",
-                    {"display_name": "Pin ranks to GPU order",
-                        "default": False,
-                        "tooltip": "Give rank i the i-th GPU listed in GPU indices instead of letting Ray choose. Collective groups are built from rank order, so on a multi socket box this decides whether an all-to-all stays on one node. Needs GPU indices to be set.",
-                    },
-                ),
                 "ray_object_store_gb": (
                     "FLOAT",
                     {"display_name": "Ray object store (GB)", 
