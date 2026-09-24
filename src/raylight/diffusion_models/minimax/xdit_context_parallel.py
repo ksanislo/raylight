@@ -117,10 +117,10 @@ def _mlp_chunk_tokens():
         return 0
 
 
-# fc2's output overflows fp16 by ~56x (measured peak 3.69e6 against 65504), so
-# its input is scaled by a power of two before the projection and unscaled in
-# fp32 afterwards. The swiglu itself is evaluated in fp32: it is pointwise and
-# not exactly representable, and it is cheap relative to the projections.
+# fc2's output overflows fp16 by ~56x (measured peak 3.69e6 against 65504), so its
+# input is scaled by a power of two before the projection and unscaled in fp32
+# afterwards. The swiglu itself is evaluated in fp32: it is pointwise and not
+# exactly representable, and it is cheap relative to the projections.
 _MLP_FP16_FC2_SCALE = 256.0
 
 

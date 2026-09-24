@@ -229,10 +229,10 @@ def _build_local_runtime_env(module_dir: Path, repo_root: Path, runtime_workdir:
         "COMFYUI_BASE_DIRECTORY": str(repo_root),
     }
     _add_nvrtc_library_path(env_vars)
-    for _name in _WORKER_ENV_KNOBS:
-        _val = os.environ.get(_name)
-        if _val is not None:
-            env_vars[_name] = _val
+    for name in _WORKER_ENV_KNOBS:
+        value = os.environ.get(name)
+        if value is not None:
+            env_vars[name] = value
     alloc_conf = _sanitized_worker_alloc_conf()
     if alloc_conf is not None:
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = alloc_conf
@@ -843,7 +843,7 @@ class RayInitializer:
 class RayWorkerOptions:
     """Per-workflow overrides for the knobs a worker reads from its environment.
 
-    These used to be settable only as server-wide environment variables, which meant a
+    These otherwise exist only as server-wide environment variables, which means a
     restart to change one and the same value for every workflow. Kept off
     RayInitializerAdvanced so its panel stays readable; plug this into its
     `worker_options` input when you need something other than the server default.
@@ -880,7 +880,7 @@ class RayWorkerOptions:
                     s.TRI,
                     {"display_name": "MiniMax H3: fp32 residual",
                      "default": "auto",
-                     "tooltip": "Accumulate the residual stream in fp32. The residual reaches ~1e7 across 50 blocks, far past fp16's range. `auto` keeps the server setting.",
+                     "tooltip": "Accumulate the residual stream in fp32. The residual reaches ~1e7 across 50 blocks, far past fp16's range. `auto` keeps the server setting (RAYLIGHT_FP32_RESIDUAL).",
                      },
                 ),
                 "mlp_chunk_tokens": (
