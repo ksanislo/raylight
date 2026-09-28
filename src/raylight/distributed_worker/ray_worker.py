@@ -394,10 +394,7 @@ def _progress_reporting(model, local_rank, total_steps=1):
     Blocks are found by walking the diffusion model for ModuleLists, so this
     works for any architecture and degrades to step-only if none are found.
     """
-    if local_rank != 0:
-        yield
-        return
-
+    import comfy.model_management as comfy_model_management
     import comfy.utils as comfy_utils
     from raylight import progress
 
@@ -419,11 +416,40 @@ def _progress_reporting(model, local_rank, total_steps=1):
     root = getattr(getattr(model, "model", model), "diffusion_model", None)
     blocks = _collect_blocks(root) if root is not None else []
     n_blocks = max(len(blocks), 1)
+
+    def _stop_if_cancelled():
+        if progress.cancel_requested():
+            raise comfy_model_management.InterruptProcessingException()
+
+    #Every rank watches, not just the reporting one. A rank that leaves a
+    #collective alone strands its peers waiting on a member that is gone; all
+    #of them checking the same marker at the same block leaves together.
+    if local_rank != 0:
+        def on_block_cancel(_module, _args, _output):
+            _stop_if_cancelled()
+
+        handles = []
+        try:
+            for block in blocks:
+                try:
+                    handles.append(block.register_forward_hook(on_block_cancel))
+                except Exception:
+                    pass
+            yield
+        finally:
+            for handle in handles:
+                try:
+                    handle.remove()
+                except Exception:
+                    pass
+        return
+
     state = {"step": 0, "steps": max(int(total_steps), 1), "seen": 0, "pseq": 0}
     progress.clear()
 
     def on_step(value, total, preview=None, **_kwargs):
         # ComfyUI passes node_id as a keyword; accept whatever it sends.
+        _stop_if_cancelled()
         state["step"] = int(value)
         state["steps"] = max(int(total), 1)
         state["seen"] = 0
@@ -438,6 +464,10 @@ def _progress_reporting(model, local_rank, total_steps=1):
 
     def on_block(_module, _args, _output):
         state["seen"] = min(state["seen"] + 1, n_blocks)
+        #Checked here rather than per step: a step is a whole denoise pass, so a
+        #cancel would not land for tens of seconds. A block is the finest point
+        #the host can be answered from while sampling holds the actor.
+        _stop_if_cancelled()
         progress.write(state["step"] * n_blocks + state["seen"],
                        state["steps"] * n_blocks, preview_seq=state["pseq"])
 
