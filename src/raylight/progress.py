@@ -16,6 +16,7 @@ import time
 
 _STATE = "sampler_progress.json"
 _PREVIEW = "sampler_preview.jpg"
+_CANCEL = "sampler_cancel"
 _MIN_INTERVAL = 0.25
 
 _last_write = 0.0
@@ -33,11 +34,30 @@ def _path(name):
 
 
 def clear():
-    for name in (_STATE, _PREVIEW):
+    for name in (_STATE, _PREVIEW, _CANCEL):
         try:
             os.unlink(_path(name))
         except OSError:
             pass
+
+
+def request_cancel():
+    """Ask rank 0 to stop sampling.
+
+    The same reason progress travels by file applies in reverse: an actor busy
+    sampling cannot answer a call telling it to stop.
+    """
+    try:
+        target = _path(_CANCEL)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w"):
+            pass
+    except OSError:
+        pass
+
+
+def cancel_requested():
+    return os.path.exists(_path(_CANCEL))
 
 
 def write(value, total, force=False, preview_seq=0):
