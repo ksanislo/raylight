@@ -9,6 +9,7 @@ import comfy.sample
 from comfy.k_diffusion import sa_solver
 from comfy.comfy_types import IO, ComfyNodeABC, InputTypeDict
 import comfy.utils
+from raylight.distributed_worker.ray_worker import retire_actors
 from .ray_patch_decorator import ray_patch_with_return
 
 from raylight.distributed_worker.utils import Noise_EmptyNoise, Noise_RandomNoise
@@ -91,7 +92,6 @@ def _retire_actors_after_fatal(ray_actors, exc):
     if not any(k in blob for k in ("out of memory", "outofmemory", "aimdo", "cuda error",
                                    "illegal memory access")):
         return
-    from raylight.distributed_worker.ray_worker import retire_actors
     retire_actors(ray_actors, "a fatal sampling error")
 
 
@@ -441,13 +441,21 @@ class RayDualCFGGuider:
         )
 
 
-def _gather_with_progress(futures):
+#How long to let the workers notice a cancel before they are retired anyway.
+#They stop sampling within a block or two; what takes longer is the ranks still
+#blocked in a collective, and those are killed regardless, so waiting on them
+#only delays the cancel.
+CANCEL_DRAIN_SECONDS = 10.0
+
+
+def _gather_with_progress(futures, ray_actors=None):
     """Wait on the sampling futures while relaying worker progress to the UI.
 
     ray.get() would block until sampling finished, leaving the node at 0% for
     the whole render. Poll instead, and forward whatever rank 0 published to a
     host-side ProgressBar, which does have the server's hook attached.
     """
+    import comfy.model_management
     import comfy.utils
     from raylight import progress
 
@@ -456,18 +464,39 @@ def _gather_with_progress(futures):
     last = None
     last_preview_seq = -1
     preview = None
-    while pending:
-        _ready, pending = ray.wait(pending, num_returns=len(pending), timeout=0.5)
-        current = progress.read()
-        if current is not None and current != last:
-            last = current
-            value, total, preview_seq = current
-            if preview_seq != last_preview_seq:
-                last_preview_seq = preview_seq
-                image = progress.read_preview()
-                preview = ("JPEG", image, 512) if image is not None else None
-            pbar.update_absolute(min(value, total), total, preview)
-    return ray.get(futures)
+    try:
+        while pending:
+            _ready, pending = ray.wait(pending, num_returns=len(pending), timeout=0.5)
+            #Checked every pass rather than only when the bar moves: a render that
+            #has stopped publishing progress is exactly the one worth cancelling.
+            comfy.model_management.throw_exception_if_processing_interrupted()
+            current = progress.read()
+            if current is not None and current != last:
+                last = current
+                value, total, preview_seq = current
+                if preview_seq != last_preview_seq:
+                    last_preview_seq = preview_seq
+                    image = progress.read_preview()
+                    preview = ("JPEG", image, 512) if image is not None else None
+                pbar.update_absolute(min(value, total), total, preview)
+        return ray.get(futures)
+    except comfy.model_management.InterruptProcessingException:
+        #Leaving now only stops the host waiting; the workers would sample to the
+        #end on a result nobody reads, holding the devices for the whole render.
+        progress.request_cancel()
+        #A cancel is cooperative: it is noticed at a block boundary, so it only
+        #reaches a worker that is still running. Whoever answers within the drain
+        #unwound properly and stays usable - comfy ends the allocation graph even
+        #when the forward leaves by exception, so the pool is still warm.
+        _ready, stuck = ray.wait(futures, num_returns=len(futures),
+                                 timeout=CANCEL_DRAIN_SECONDS)
+        if stuck and ray_actors is not None:
+            #Whoever did not answer was not running to begin with. Nothing said
+            #over the side channel will reach it, so end it and let the loader
+            #respawn; otherwise it holds its devices until the server exits.
+            retire_actors(ray_actors, "%d worker(s) that did not answer a cancel"
+                          % len(stuck))
+        raise
 
 
 class XFuserSamplerCustomAdvanced:
@@ -515,7 +544,7 @@ class XFuserSamplerCustomAdvanced:
             for actor in gpu_actors
         ]
         try:
-            results = _gather_with_progress(futures)
+            results = _gather_with_progress(futures, ray_actors)
         except Exception as exc:
             _clear_ray_worker_vram_after_sampling(ray_actors, force=True)
             _retire_actors_after_fatal(ray_actors, exc)
@@ -596,7 +625,7 @@ class XFuserSamplerCustom:
             for actor in gpu_actors
         ]
         try:
-            results = _gather_with_progress(futures)
+            results = _gather_with_progress(futures, ray_actors)
         except Exception as exc:
             _clear_ray_worker_vram_after_sampling(ray_actors, force=True)
             _retire_actors_after_fatal(ray_actors, exc)
@@ -660,7 +689,7 @@ class UnifiedParallelSamplerCustomAdvanced:
             for actor, group_info in zip(gpu_actors, group_infos)
         ]
         try:
-            results = _gather_with_progress(futures)
+            results = _gather_with_progress(futures, ray_actors)
         except Exception as exc:
             _clear_ray_worker_vram_after_sampling(ray_actors, force=True)
             _retire_actors_after_fatal(ray_actors, exc)
@@ -752,7 +781,7 @@ class UnifiedParallelSamplerCustom:
             for actor, group_info in zip(gpu_actors, group_infos)
         ]
         try:
-            results = _gather_with_progress(futures)
+            results = _gather_with_progress(futures, ray_actors)
         except Exception as exc:
             _clear_ray_worker_vram_after_sampling(ray_actors, force=True)
             _retire_actors_after_fatal(ray_actors, exc)
@@ -812,7 +841,7 @@ class DPSamplerCustomAdvanced:
             for i, actor in enumerate(gpu_actors)
         ]
         try:
-            results = _gather_with_progress(futures)
+            results = _gather_with_progress(futures, ray_actors)
         except Exception as exc:
             _clear_ray_worker_vram_after_sampling(ray_actors, force=True)
             _retire_actors_after_fatal(ray_actors, exc)
@@ -907,7 +936,7 @@ class DPSamplerCustom:
             for i, actor in enumerate(gpu_actors)
         ]
         try:
-            out = _gather_with_progress(futures)
+            out = _gather_with_progress(futures, ray_actors)
         except Exception as exc:
             _clear_ray_worker_vram_after_sampling(ray_actors, force=True)
             _retire_actors_after_fatal(ray_actors, exc)
