@@ -1713,6 +1713,34 @@ def make_ray_actor_fn(world_size, parallel_dict):
     return _init_ray_actor
 
 
+_ACTOR_GENERATION = 0
+
+
+def actor_generation():
+    """Bumped whenever the workers are retired.
+
+    ensure_fresh_actors lives in the loader, and the loader is a node: with its
+    inputs unchanged comfy serves a cached result and never calls it, so killing
+    workers on their own leaves the graph holding handles to dead actors. The
+    loader reports this from IS_CHANGED, which puts the respawn back under comfy's
+    own cache rules.
+    """
+    return _ACTOR_GENERATION
+
+
+def retire_actors(ray_actors, reason):
+    """Kill the workers and make the loader run again next time."""
+    global _ACTOR_GENERATION
+    for actor in ray_actors.get("workers", []):
+        try:
+            ray.kill(actor, no_restart=True)
+        except Exception:
+            pass
+    _ACTOR_GENERATION += 1
+    logging.warning("[Raylight] retired workers after %s; they will be respawned "
+                    "on the next run", reason)
+
+
 # (TODO-Komikndr) Should be removed since FSDP can be unloaded properly
 def ensure_fresh_actors(ray_actors_init):
     ray_actors, ray_actor_fn = ray_actors_init

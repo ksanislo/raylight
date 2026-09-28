@@ -23,6 +23,7 @@ from comfy import sd, sample, utils  # type: ignore
 
 from .distributed_worker.ray_worker import (
     make_ray_actor_fn,
+    actor_generation,
     ensure_fresh_actors,
     ray_nccl_tester,
 )
@@ -1173,6 +1174,12 @@ class RayUNETLoader:
     FUNCTION = "load_ray_unet"
 
     CATEGORY = "Raylight"
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        #Re-run once the workers have been retired, so ensure_fresh_actors gets
+        #the chance to respawn them instead of the graph reusing dead handles.
+        return actor_generation()
 
     def load_ray_unet(self, ray_actors_init, unet_name, weight_dtype, lora=None):
         _free_host_vram_before_worker_load()

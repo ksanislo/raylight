@@ -91,13 +91,8 @@ def _retire_actors_after_fatal(ray_actors, exc):
     if not any(k in blob for k in ("out of memory", "outofmemory", "aimdo", "cuda error",
                                    "illegal memory access")):
         return
-    for actor in ray_actors.get("workers", []):
-        try:
-            ray.kill(actor, no_restart=True)
-        except Exception:
-            pass
-    logging.warning("[Raylight] retired workers after a fatal sampling error; "
-                    "they will be respawned on the next run")
+    from raylight.distributed_worker.ray_worker import retire_actors
+    retire_actors(ray_actors, "a fatal sampling error")
 
 
 def _clear_ray_worker_vram_after_sampling(ray_actors, force=False):
