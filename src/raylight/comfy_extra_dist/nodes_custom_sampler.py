@@ -1,3 +1,4 @@
+import time
 import gc
 import logging
 import ray
@@ -441,11 +442,45 @@ class RayDualCFGGuider:
         )
 
 
-#How long to let the workers notice a cancel before they are retired anyway.
-#They stop sampling within a block or two; what takes longer is the ranks still
-#blocked in a collective, and those are killed regardless, so waiting on them
-#only delays the cancel.
-CANCEL_DRAIN_SECONDS = 10.0
+#A cancel is noticed at a checkpoint, so the time it should take to arrive is
+#one checkpoint interval - a property of the machine, not a constant, since one
+#block on a slow card can outlast any figure picked here. Measure the widest gap
+#seen between checkpoints during the run, which is what a worker is expected to
+#need, and allow a few times that. A worker is then only ended once it has
+#plainly stopped, not because the hardware was having a slow minute.
+CANCEL_DRAIN_CHECKPOINTS = 3
+CANCEL_DRAIN_MIN_SECONDS = 15.0
+CANCEL_DRAIN_MAX_SECONDS = 180.0
+#Used where there is no checkpoint signal to measure, such as a decode.
+CANCEL_DRAIN_DEFAULT_SECONDS = 60.0
+#Once one worker has answered, the cancel demonstrably works and the ranks run
+#in lockstep, so a peer that is going to answer will do so about a checkpoint
+#later. Waiting the whole window on it only delays a kill that is already due.
+CANCEL_PEER_MIN_SECONDS = 5.0
+
+
+def _drain(futures, slowest_checkpoint):
+    """Return the futures that never answered the cancel.
+
+    The full wait is only spent while nothing at all has answered. The moment one
+    worker does, the rest are given a short window instead: they are doing the
+    same work at the same time, so one still silent has stopped rather than
+    fallen behind.
+    """
+    grace = _drain_seconds(slowest_checkpoint)
+    answered, pending = ray.wait(futures, num_returns=1, timeout=grace)
+    if not answered:
+        return pending
+    peer = min(max(slowest_checkpoint, CANCEL_PEER_MIN_SECONDS), grace)
+    _more, stuck = ray.wait(pending, num_returns=len(pending), timeout=peer) if pending else ([], [])
+    return stuck
+
+
+def _drain_seconds(slowest_checkpoint):
+    if not slowest_checkpoint:
+        return CANCEL_DRAIN_DEFAULT_SECONDS
+    return min(max(slowest_checkpoint * CANCEL_DRAIN_CHECKPOINTS,
+                   CANCEL_DRAIN_MIN_SECONDS), CANCEL_DRAIN_MAX_SECONDS)
 
 
 def _gather_with_progress(futures, ray_actors=None):
@@ -464,6 +499,8 @@ def _gather_with_progress(futures, ray_actors=None):
     last = None
     last_preview_seq = -1
     preview = None
+    slowest_checkpoint = 0.0
+    seen_at = time.monotonic()
     try:
         while pending:
             _ready, pending = ray.wait(pending, num_returns=len(pending), timeout=0.5)
@@ -472,6 +509,9 @@ def _gather_with_progress(futures, ray_actors=None):
             comfy.model_management.throw_exception_if_processing_interrupted()
             current = progress.read()
             if current is not None and current != last:
+                now = time.monotonic()
+                slowest_checkpoint = max(slowest_checkpoint, now - seen_at)
+                seen_at = now
                 last = current
                 value, total, preview_seq = current
                 if preview_seq != last_preview_seq:
@@ -488,8 +528,7 @@ def _gather_with_progress(futures, ray_actors=None):
         #reaches a worker that is still running. Whoever answers within the drain
         #unwound properly and stays usable - comfy ends the allocation graph even
         #when the forward leaves by exception, so the pool is still warm.
-        _ready, stuck = ray.wait(futures, num_returns=len(futures),
-                                 timeout=CANCEL_DRAIN_SECONDS)
+        stuck = _drain(futures, slowest_checkpoint)
         if stuck and ray_actors is not None:
             #Whoever did not answer was not running to begin with. Nothing said
             #over the side channel will reach it, so end it and let the loader
