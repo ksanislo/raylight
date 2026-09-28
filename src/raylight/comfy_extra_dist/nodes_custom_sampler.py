@@ -1,3 +1,4 @@
+import collections
 import time
 import gc
 import logging
@@ -469,6 +470,12 @@ class RayDualCFGGuider:
 #need, and allow a few times that. A worker is then only ended once it has
 #plainly stopped, not because the hardware was having a slow minute.
 CANCEL_DRAIN_CHECKPOINTS = 3
+#How many recent checkpoints the estimate is taken from. Recent, so a pause
+#early in the run - the first checkpoint follows the model load - does not set
+#the figure for everything after it. Their widest rather than their average: the
+#average understates the tail, and the tail is exactly the checkpoint that would
+#see a healthy worker ended for being slow.
+CANCEL_DRAIN_SAMPLES = 8
 CANCEL_DRAIN_MIN_SECONDS = 15.0
 CANCEL_DRAIN_MAX_SECONDS = 180.0
 #Used where there is no checkpoint signal to measure, such as a decode.
@@ -519,8 +526,8 @@ def _gather_with_progress(futures, ray_actors=None):
     last = None
     last_preview_seq = -1
     preview = None
-    slowest_checkpoint = 0.0
-    seen_at = time.monotonic()
+    checkpoints = collections.deque(maxlen=CANCEL_DRAIN_SAMPLES)
+    seen_at = None
     try:
         while pending:
             _ready, pending = ray.wait(pending, num_returns=len(pending), timeout=0.5)
@@ -530,7 +537,10 @@ def _gather_with_progress(futures, ray_actors=None):
             current = progress.read()
             if current is not None and current != last:
                 now = time.monotonic()
-                slowest_checkpoint = max(slowest_checkpoint, now - seen_at)
+                #The gap before the first checkpoint covers loading the model, so
+                #it says nothing about how quickly one arrives after another.
+                if seen_at is not None:
+                    checkpoints.append(now - seen_at)
                 seen_at = now
                 last = current
                 value, total, preview_seq = current
@@ -548,7 +558,7 @@ def _gather_with_progress(futures, ray_actors=None):
         #reaches a worker that is still running. Whoever answers within the drain
         #unwound properly and stays usable - comfy ends the allocation graph even
         #when the forward leaves by exception, so the pool is still warm.
-        stuck = _drain(futures, slowest_checkpoint)
+        stuck = _drain(futures, max(checkpoints) if checkpoints else 0.0)
         if stuck and ray_actors is not None:
             #Whoever did not answer was not running to begin with. Nothing said
             #over the side channel will reach it, so end it and let the loader
