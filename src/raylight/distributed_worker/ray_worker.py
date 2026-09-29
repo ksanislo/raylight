@@ -387,7 +387,7 @@ def _build_ray_guider(model, guider_spec):
 
 
 @contextlib.contextmanager
-def _progress_reporting(model, local_rank, total_steps=1):
+def _progress_reporting(model, local_rank, total_steps=1, root=None):
     """Publish sampler progress from rank 0 so the host can display it.
 
     ComfyUI's ProgressBar reports through a global hook owned by the server,
@@ -417,7 +417,11 @@ def _progress_reporting(model, local_rank, total_steps=1):
                 found.extend(_collect_blocks(child, depth + 1))
         return found
 
-    root = getattr(getattr(model, "model", model), "diffusion_model", None)
+    #Named by the caller when the stack being run is not a diffusion model: the
+    #text encoder reports through the same channel, and its blocks live
+    #elsewhere.
+    if root is None:
+        root = getattr(getattr(model, "model", model), "diffusion_model", None)
     blocks = _collect_blocks(root) if root is not None else []
     n_blocks = max(len(blocks), 1)
 
@@ -536,6 +540,29 @@ def _sampler_step_count(signature, args, kwargs):
     except Exception:
         pass
     return 1
+
+
+def report_encode_progress(fn):
+    """Report an encode the way the samplers report a denoise.
+
+    The encode is one forward pass, so there are no steps to count and the bar
+    is advanced by the encoder's own blocks instead. That also gives the cancel
+    check somewhere to run: without it the host's interrupt never reaches a
+    worker mid-encode.
+    """
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        from raylight.comfy_dist.model_patcher import shard_root
+
+        root = None
+        if self.clip_patcher is not None:
+            try:
+                root = shard_root(self.clip_patcher)
+            except Exception as e:
+                print(f"[Rank {self.local_rank}] no encode progress: {e}")
+        with _progress_reporting(None, self.local_rank, 1, root=root):
+            return fn(self, *args, **kwargs)
+    return wrapper
 
 
 def report_progress(fn):
@@ -1105,6 +1132,7 @@ class RayWorker:
 
     @patch_temp_fix_ck_ops
     @patch_enable_comfy_kitchen_fsdp
+    @report_encode_progress
     def encode_tokens(self, tokens):
         """Run the sharded encoder over already-tokenized input.
 
