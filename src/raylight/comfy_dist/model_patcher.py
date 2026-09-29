@@ -17,6 +17,7 @@ import comfy
 from comfy.patcher_extension import CallbacksMP
 from comfy.model_patcher import get_key_weight, string_to_seed, move_weight_functions
 
+from raylight import crash_trace
 from raylight import comfy_dist
 from .fsdp_utils import freeze_and_detect_qt, fully_shard_bottom_up, load_from_full_model_state_dict, materialize_excluded_params, materialize_remaining_meta_params
 from .kitchen_distributed import temporary_sitepkg_ck_patches
@@ -357,6 +358,7 @@ def patch_fsdp(self):
         print(f"[Rank {self.rank}] Excluding {len(excluded_modules)} ControlNet-shared modules from FSDP: "
               f"{[n for n, m in diffusion_model.named_modules() if m in excluded_modules]}")
 
+    crash_trace.mark("fully_shard begin", self.rank)
     fully_shard_bottom_up(
         diffusion_model,
         fsdp_kwargs=fsdp_kwargs,
@@ -413,7 +415,9 @@ def patch_fsdp(self):
         if leftover > 0:
             print(f"[Rank {self.rank}] Materialized {leftover} ignored param(s) left on meta")
 
+        crash_trace.mark("pre_init_fsdp", self.rank)
         _pre_init_fsdp(diffusion_model)
+        crash_trace.mark("patch_fsdp done", self.rank)
     self.fsdp_state_dict = None
 
     print("FSDP registered successfully.")

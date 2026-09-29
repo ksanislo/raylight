@@ -8,6 +8,7 @@ from comfy_extras.nodes_minimax_h3 import MiniMaxH3FunControlBlockPatch
 from comfy.ldm.minimax.model import _mod_gate, _mod_scale_shift, AUDIO_COND_TIMESTEP, VISUAL_COND_TIMESTEP, PackedLayout, mask_row_values, pack_audio, patchify_video, rope_rotation_table, time_shift_sigma, unpack_audio, unpatchify_video
 from xfuser.core.distributed import get_sequence_parallel_rank, get_sequence_parallel_world_size, get_sp_group
 
+from raylight import crash_trace
 import raylight.distributed_modules.attention as xfuser_attn
 from ..utils import pad_to_world_size
 
@@ -96,7 +97,11 @@ def usp_attn_forward(self, x, rope_freqs=None, transformer_options={}):
     q = q.transpose(0, 1).unsqueeze(0)
     k = k.transpose(0, 1).unsqueeze(0)
     v = v.transpose(0, 1).unsqueeze(0)
+    #The ulysses all-to-all and the ring passes happen in here, which is the
+    #part of a block that touches every other rank.
+    crash_trace.mark("attn collective")
     out = xfuser_optimized_attention(q, k, v, self.heads, skip_reshape=True, transformer_options=transformer_options)
+    crash_trace.mark("attn done")
     out = out.squeeze(0)
     if fp16:
         if out.dtype != torch.float16:
@@ -149,6 +154,7 @@ def _mlp_chunk_tokens():
 # afterwards. The swiglu itself is evaluated in fp32: it is pointwise and not
 # exactly representable, and it is cheap relative to the projections.
 def _mlp_branch(self, x):
+    crash_trace.mark("mlp")
     gate, up = self.fc1(x).chunk(2, dim=-1)
     if x.dtype != torch.float16:
         return self.fc2(torch.nn.functional.silu(gate).mul_(up))

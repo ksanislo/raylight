@@ -4,6 +4,7 @@ import json
 from dataclasses import replace
 from typing import Any, cast
 
+from raylight import crash_trace
 import torch
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor
@@ -677,9 +678,11 @@ def load_from_full_model_state_dict(
     release_sd=True,
 ):
     meta_sharded_sd = model.state_dict()
+    crash_trace.mark("shard-load begin n={}".format(len(meta_sharded_sd)))
     sharded_sd: dict[str, torch.Tensor] = {}
     unsharded_params = []
     for param_name, sharded_meta_param in meta_sharded_sd.items():
+        crash_trace.mark("shard-load {}".format(param_name))
         parent_module, leaf_name = _get_parent_module_and_name(model, param_name)
         is_buffer = leaf_name in parent_module._buffers
         if not is_buffer and _should_materialize_unsharded_param(param_name, sharded_meta_param, full_sd):
@@ -734,6 +737,7 @@ def load_from_full_model_state_dict(
         sharded_sd[param_name] = sharded_tensor if is_buffer else torch.nn.Parameter(sharded_tensor)
         if release_sd:
             full_sd[param_name] = None
+    crash_trace.mark("shard-load assign")
     out = model.load_state_dict(sharded_sd, strict=strict, assign=True)
     for param_name, meta_param, full_tensor in unsharded_params:
         _materialize_unsharded_param(model, param_name, meta_param, full_tensor, device, cpu_offload)

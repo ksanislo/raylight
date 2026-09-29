@@ -1,6 +1,7 @@
 import torch
 
 import comfy.model_management as comfy_model_management
+from raylight import crash_trace
 from raylight import progress
 
 
@@ -160,6 +161,8 @@ def _normalize_latents(model, z):
 def ray_vae_decode_temporal_partial_impl(worker, samples, job_rank=0, job_world_size=1):
     import comfy.model_management as model_management
 
+    crash_trace.mark("vae temporal partial enter rank={}".format(job_rank))
+
     _validate_job_rank(job_rank, job_world_size)
 
     vae = worker.vae_model
@@ -177,8 +180,10 @@ def ray_vae_decode_temporal_partial_impl(worker, samples, job_rank=0, job_world_
         raise ValueError(f"Distributed VAE (Ray) temporal decode expects a 5D latent, got {latent.ndim}D.")
 
     memory_used = vae.memory_used_decode(latent.shape, vae.vae_dtype)
+    crash_trace.mark("vae load_models_gpu")
     model_management.load_models_gpu([vae.patcher], memory_required=memory_used, force_full_load=vae.disable_offload)
 
+    crash_trace.mark("vae loaded")
     output_shape = tuple(model.decode_output_shape(latent.shape))
 
     chunks = []
@@ -197,9 +202,11 @@ def ray_vae_decode_temporal_partial_impl(worker, samples, job_rank=0, job_world_
             #which for a long clip is most of what there was to cancel.
             if progress.cancel_requested():
                 raise comfy_model_management.InterruptProcessingException()
+            crash_trace.mark("vae chunk {}/{}".format(chunk_index, num_chunks))
             t_start_idx = chunk_index * model.tokens_chunk_size
             t_end_idx = t_start_idx + model.tokens_chunk_size + model.token_overlap
             clip_dec = model._adaptive_decode(z[:, :, t_start_idx:t_end_idx, :, :])
+            crash_trace.mark("vae chunk {} decoded".format(chunk_index))
             chunks.append((chunk_index, clip_dec.to(device="cpu", copy=True)))
 
     return {
@@ -289,6 +296,7 @@ def combine_temporal_vae_chunks(model, device, output_shape, chunks):
 
 
 def ray_vae_decode_temporal_combine_impl(worker, worker_partials):
+    crash_trace.mark("vae combine enter")
     import comfy.model_management as model_management
 
     vae = worker.vae_model

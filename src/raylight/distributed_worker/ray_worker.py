@@ -51,6 +51,7 @@ from raylight.distributed_worker.ray_worker_vae import (
     ray_seedvr2_vae_decode_partial_impl,
     temporal_chunk_model,
 )
+from raylight import crash_trace
 from raylight.distributed_worker.utils import Noise_EmptyNoise, Noise_RandomNoise, patch_ray_tqdm
 from raylight.comfy_dist.quant_ops import patch_temp_fix_ck_ops
 from raylight.numa import bind_to_gpu_node
@@ -429,6 +430,14 @@ def _progress_reporting(model, local_rank, total_steps=1, root=None):
         if progress.cancel_requested():
             raise comfy_model_management.InterruptProcessingException()
 
+    #Durable marker before each block runs. A host reset leaves nothing behind,
+    #so the last block to start is the only evidence of where it went. The index
+    #wrapping back to 0 is a step boundary.
+    _block_index = {id(block): i for i, block in enumerate(blocks)}
+
+    def on_block_pre(module, _args):
+        crash_trace.mark("block {}".format(_block_index.get(id(module), "?")), local_rank)
+
     #Every rank watches, not just the reporting one. A rank that leaves a
     #collective alone strands its peers waiting on a member that is gone; all
     #of them checking the same marker at the same block leaves together.
@@ -440,6 +449,7 @@ def _progress_reporting(model, local_rank, total_steps=1, root=None):
         try:
             for block in blocks:
                 try:
+                    handles.append(block.register_forward_pre_hook(on_block_pre))
                     handles.append(block.register_forward_hook(on_block_cancel))
                 except Exception:
                     pass
@@ -508,6 +518,7 @@ def _progress_reporting(model, local_rank, total_steps=1, root=None):
     try:
         for block in blocks:
             try:
+                handles.append(block.register_forward_pre_hook(on_block_pre))
                 handles.append(block.register_forward_hook(on_block))
             except Exception:
                 pass
@@ -572,7 +583,11 @@ def report_progress(fn):
     def wrapper(self, *args, **kwargs):
         steps = _sampler_step_count(signature, (self,) + args, kwargs)
         with _progress_reporting(self.model, self.local_rank, steps):
-            return fn(self, *args, **kwargs)
+            crash_trace.mark("sampler {} enter".format(fn.__name__), self.local_rank)
+            try:
+                return fn(self, *args, **kwargs)
+            finally:
+                crash_trace.mark("sampler {} exit".format(fn.__name__), self.local_rank)
     return wrapper
 
 
@@ -1084,6 +1099,7 @@ class RayWorker:
 
         from raylight.comfy_dist.sd import fsdp_load_text_encoder
 
+        crash_trace.mark("load_clip build", self.local_rank)
         self.clip, self.clip_patcher, self.clip_state_dict = fsdp_load_text_encoder(
             clip_path,
             clip_type,
@@ -1158,7 +1174,9 @@ class RayWorker:
 
         #clip.patcher is the FSDP patcher, so encode_from_tokens loads and shards
         #on its own; loading here first would only do it twice.
+        crash_trace.mark("encode forward begin", self.local_rank)
         out = self.clip.encode_from_tokens(tokens, return_pooled=True, return_dict=True)
+        crash_trace.mark("encode forward done", self.local_rank)
         #Only rank 0's copy is returned; every rank computes the same thing.
         if self.local_rank != 0:
             return None
