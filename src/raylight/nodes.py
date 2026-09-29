@@ -1615,8 +1615,14 @@ class RayCLIP:
         return self.tokenizer.tokenize_with_weights(text, return_word_ids, **kwargs)
 
     def encode_from_tokens(self, tokens, return_pooled=False, return_dict=False):
+        from raylight.comfy_extra_dist.nodes_custom_sampler import _gather_with_progress
+
         workers = self.ray_actors["workers"]
-        results = ray.get([actor.encode_tokens.remote(tokens) for actor in workers])
+        futures = [actor.encode_tokens.remote(tokens) for actor in workers]
+        #Same wait the samplers use: ray.get would sit at 0% for the whole encode
+        #and swallow an interrupt, because the ProgressBar that reports and polls
+        #for cancellation only has the server's hook on the host side.
+        results = _gather_with_progress(futures, self.ray_actors)
         out = next(r for r in results if r is not None)
         if return_dict:
             return out
