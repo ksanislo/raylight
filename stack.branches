@@ -1,0 +1,101 @@
+# stack.branches: source of truth for this fork's PR branches and the combined main.
+#
+# Two concerns are kept separate on purpose:
+#
+#   * Each PR branch declares the base it rebases onto, 'base' (upstream, the
+#     PR target) or another branch (a real dependency chain). This keeps every
+#     branch's PR diff limited to its own work: independent fixes sit on 'base'
+#     and never drag each other in.
+#
+#   * 'assemble' lists the order in which every branch's OWN commits are stacked
+#     into the combined 'main' we run. main is a throwaway assembly of
+#     cherry-picked copies, never a PR branch.
+#
+# Keywords:
+#   base     <ref>               upstream ref; the PR target and default base.
+#   into     <name>              the branch the assembly is written to.
+#   branch   <name> onto <ref>   a PR branch; <ref> is 'base' or another branch.
+#                                List a parent before any branch that sits on it.
+#   assemble <name> ...          build order for the combined branch.
+#
+# Lines starting with # and blank lines are ignored.
+
+base upstream/dev
+into main
+
+# -- compatibility blockers ---------------------------------------------------
+# fix/fast-disk-kwarg removed 2026-09-28: upstream added fast_disk explicitly to
+# both patchers (model_patcher.py:361 and :689) and forwards it, so the TypeError
+# on every load_unet is gone. Our **kwargs version was only a robustness
+# argument, and a weak one - FSDPModelPatcher overrides the load machinery, so
+# silently forwarding a parameter it does not honour is worse than a loud
+# TypeError. Do not refile.
+# fix/xfuser-envs-get-device-name is superseded the same way: upstream now has
+# get_device_name() at xfuser_compat.py:124. Out of the build; branch kept until
+# it is confirmed unneeded on a render.
+branch fix/xfuser-version-bound               onto base
+
+# -- plain bugs, no knobs -----------------------------------------------------
+branch fix/dead-actor-recovery                onto base
+branch fix/ring-attention-lse-padding         onto base
+branch fix/worker-nvrtc-library-path          onto base
+branch fix/parallel-quant-shard-load          onto base
+branch fix/forward-fast-disk-to-workers       onto base
+
+# -- VRAM lifecycle (a real chain: cancel needs the progress plumbing) --------
+# fix/sampler-progress adds _gather_with_progress, which the VRAM release path
+# and then the cancel path both build on.
+branch fix/sampler-progress                   onto base
+branch fix/worker-vram-release-on-failure     onto fix/sampler-progress
+branch fix/sampler-cancel                     onto fix/worker-vram-release-on-failure
+branch fix/offload-quantized-fsdp-shards      onto base
+branch fix/free-host-vram-before-shard-load   onto base
+branch fix/keep-host-models-when-gpus-pinned  onto base
+
+# -- distributed VAE decode, and cancelling one ------------------------------
+# The decode cancel checkpoint needs ray_worker_vae.py, which only exists here.
+# That is why cancellation is two branches, not one.
+branch feat/vae-temporal-chunk-decode         onto base
+branch fix/decode-cancel                      onto feat/vae-temporal-chunk-decode
+
+# -- features, all off by default --------------------------------------------
+# fix/mlp-chunk owns the _mlp_branch extraction so the single pass and the per
+# chunk path share one implementation. fp16 narrows that helper on its own
+# terms, so the fp16-aware signature is a merge resolution here rather than a
+# commit that belongs to neither branch.
+branch fix/mlp-chunk                          onto base
+# RESOLUTION NOTE: fix/mlp-chunk and feat/minimax-h3-fp16 each add
+# `import os as _os` inside the MiniMax injector in usp.py, because each needs it
+# on its own. Assembling both leaves the import twice - harmless, Python caches
+# the module, but drop one when resolving the fp16 conflict. The two injection
+# conditions union to `mlp_chunked or mlp_fp16 or <sidecar>`.
+branch feat/minimax-h3-fp16                   onto base
+branch feat/minimax-h3-fp16-node-inputs       onto feat/minimax-h3-fp16
+branch feat/numa-aware-worker-placement       onto base
+branch feat/lora-bypass-operand-placement     onto base
+branch feat/rank-gpu-pinning                  onto base
+branch fix/ray-kill-without-model-load        onto base
+branch fix/worker-pinned-memory-selectable    onto base
+branch feat/worker-vram-tunables-in-workflow  onto base
+branch feat/initializer-input-ux              onto feat/worker-vram-tunables-in-workflow
+
+# tooling/fsdp-probes is deliberately NOT in the build: it is measurement
+# scaffolding and any timing taken with it armed is unquotable.
+#
+# tooling/stack IS in the build, and has to be: PHASE 2 checks out the base and
+# cherry-picks, so unless the tooling is assembled too, the working tree loses
+# restack.sh partway through and cannot be re-run after a conflict stop. It
+# carries no code the node imports. It assembles FIRST so that after a conflict
+# stop the working tree still has restack.sh to re-run - assembled last, the
+# scripts only appear once the build already finished.
+branch tooling/stack                          onto base
+
+# Combined main = these branches' own commits, stacked in this order.
+# ORDER MATTERS for node inputs: ComfyUI node inputs are POSITIONAL, and saved
+# workflows store values by position. feat/rank-gpu-pinning inserts
+# pin_ranks_to_gpus at index 4; feat/initializer-input-ux regroups the tail.
+# Assembling rank-pinning BEFORE initializer-input-ux reproduces the input order
+# the saved workflows in ComfyUI/user/default/workflows were built against.
+# verify-restack.sh checks that order explicitly - do not reorder these two
+# without re-running it.
+assemble tooling/stack fix/xfuser-version-bound fix/dead-actor-recovery fix/ring-attention-lse-padding fix/worker-nvrtc-library-path fix/parallel-quant-shard-load fix/forward-fast-disk-to-workers fix/sampler-progress fix/worker-vram-release-on-failure fix/sampler-cancel fix/offload-quantized-fsdp-shards fix/free-host-vram-before-shard-load fix/keep-host-models-when-gpus-pinned feat/vae-temporal-chunk-decode fix/decode-cancel fix/mlp-chunk feat/minimax-h3-fp16 feat/minimax-h3-fp16-node-inputs feat/numa-aware-worker-placement feat/lora-bypass-operand-placement feat/rank-gpu-pinning fix/ray-kill-without-model-load fix/worker-pinned-memory-selectable feat/worker-vram-tunables-in-workflow feat/initializer-input-ux
