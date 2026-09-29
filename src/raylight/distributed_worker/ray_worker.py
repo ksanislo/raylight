@@ -1046,6 +1046,11 @@ class RayWorker:
             except Exception as e:
                 print(f"[Rank {self.local_rank}] offload_fsdp_vram failed for the text encoder: {e}")
 
+    def restore_clip_vram(self):
+        """Bring back what offload_clip_vram moved to the host."""
+        if self.clip_patcher is not None and hasattr(self.clip_patcher, "restore_fsdp_vram"):
+            self.clip_patcher.restore_fsdp_vram()
+
     @patch_temp_fix_ck_ops
     @patch_enable_comfy_kitchen_fsdp
     def encode_tokens(self, tokens):
@@ -1064,6 +1069,12 @@ class RayWorker:
             raise RuntimeError("encode_tokens called before load_clip")
         if self.clip_state_dict is not None:
             self.set_clip_state_dict()
+
+        #The offload frees the storage of every tensor it moved, and only the
+        #sharded ones come back on their own: FSDP re-gathers those in its
+        #forward pre-hook, while a replicated parameter - the embedding held out
+        #of the sharding - has no hook and would be read with an empty storage.
+        self.restore_clip_vram()
 
         #clip.patcher is the FSDP patcher, so encode_from_tokens loads and shards
         #on its own; loading here first would only do it twice.
