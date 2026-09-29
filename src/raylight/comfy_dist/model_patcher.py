@@ -310,10 +310,21 @@ def _expand_shape_changing_patches(model_patcher) -> None:
         comfy.utils.set_attr_param(model_patcher.model, bias_key, torch.empty(bias_shape, dtype=bias.dtype, device=bias.device))
 
 
-def patch_fsdp(self):
-    print(f"[Rank {self.rank}] Applying FSDP to {type(self.model.diffusion_model).__name__}")
+def shard_root(self):
+    #The module to shard is named rather than assumed: a diffusion model hangs
+    #off .diffusion_model, but the same machinery shards any transformer stack.
+    #A text encoder sits further down, so the name may be a dotted path.
+    module = self.model
+    for part in getattr(self, "shard_target", "diffusion_model").split("."):
+        module = getattr(module, part)
+    return module
 
-    if isinstance(self.model.diffusion_model, FSDPModule):
+
+def patch_fsdp(self):
+    target_module = shard_root(self)
+    print(f"[Rank {self.rank}] Applying FSDP to {type(target_module).__name__}")
+
+    if isinstance(target_module, FSDPModule):
         if self.fsdp_state_dict is not None:
             raise RuntimeError("FSDP initialization previously failed; reload the Raylight model before sampling again")
         print("FSDP already registered, skip wrapping...")
@@ -322,7 +333,7 @@ def patch_fsdp(self):
     if self.fsdp_state_dict is None:
         raise ValueError("FSDP state_dict is None. Call set_fsdp_state_dict before patch_fsdp.")
 
-    diffusion_model = self.model.diffusion_model
+    diffusion_model = target_module
     _expand_shape_changing_patches(self)
     fsdp_kwargs = {"reshard_after_forward": True}
     has_qt_runtime = freeze_and_detect_qt(diffusion_model)
@@ -337,6 +348,11 @@ def patch_fsdp(self):
             print(f"[Rank {self.rank}] Promoted {replaced} non-floating quant params to meta placeholders before FSDP wrapping")
 
     excluded_modules = _collect_controlnet_shared_modules(diffusion_model)
+    #Modules the caller knows are reached outside the root's forward. FSDP
+    #all-gathers in a forward pre-hook, so a module called directly - the way
+    #sd1_clip reaches get_input_embeddings() before running the transformer -
+    #would hand a sharded DTensor to an op expecting a plain tensor.
+    excluded_modules = set(excluded_modules) | set(getattr(self, "shard_excluded_modules", ()) or ())
     if excluded_modules:
         print(f"[Rank {self.rank}] Excluding {len(excluded_modules)} ControlNet-shared modules from FSDP: "
               f"{[n for n, m in diffusion_model.named_modules() if m in excluded_modules]}")
@@ -438,7 +454,7 @@ class FSDPModelPatcher(comfy.model_patcher.ModelPatcher):
     def config_fsdp(self, rank, device_mesh):
         self.rank = rank
         self.device_mesh = device_mesh
-        self.model.diffusion_model.to("meta")
+        shard_root(self).to("meta")
 
     def set_fsdp_state_dict(self, sd):
         self.fsdp_state_dict = sd
@@ -606,7 +622,7 @@ class FSDPModelPatcher(comfy.model_patcher.ModelPatcher):
 
     def load(self, device_to=None, lowvram_model_memory=0, force_patch_weights=False, full_load=False):
         with self.use_ejected():
-            if not isinstance(self.model.diffusion_model, FSDPModule):
+            if not isinstance(shard_root(self), FSDPModule):
                 self.patch_fsdp()
             self.unpatch_hooks()
             mem_counter = 0
@@ -724,7 +740,7 @@ class FSDPModelPatcher(comfy.model_patcher.ModelPatcher):
             if device_to is not None:
                 if next(self.model.parameters()).device == torch.device("meta"):
                     pass
-                elif isinstance(self.model.diffusion_model, FSDPModule):
+                elif isinstance(shard_root(self), FSDPModule):
                     # FSDP-wrapped model: self.model.to(device_to) would call
                     # DTensor.to(device) on each parameter, which materializes
                     # full tensors per worker (breaking sharding).
