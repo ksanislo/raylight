@@ -47,6 +47,11 @@ branch fix/forward-fast-disk-to-workers       onto base
 # and then the cancel path both build on.
 branch fix/sampler-progress                   onto base
 branch fix/worker-vram-release-on-failure     onto fix/sampler-progress
+
+# The text encoder reports progress and answers a cancel through the machinery
+# fix/sampler-progress adds, so it chains onto it rather than onto base. File
+# that one first if these ever go upstream.
+branch feat/fsdp-text-encoder                 onto fix/sampler-progress
 branch fix/sampler-cancel                     onto fix/worker-vram-release-on-failure
 branch fix/offload-quantized-fsdp-shards      onto base
 branch fix/free-host-vram-before-shard-load   onto base
@@ -74,6 +79,7 @@ branch feat/minimax-h3-fp16-node-inputs       onto feat/minimax-h3-fp16
 branch feat/numa-aware-worker-placement       onto base
 branch feat/lora-bypass-operand-placement     onto base
 branch feat/rank-gpu-pinning                  onto base
+branch fix/ck-patch-scope-nesting             onto base
 branch fix/ray-kill-without-model-load        onto base
 branch fix/worker-pinned-memory-selectable    onto base
 branch feat/worker-vram-tunables-in-workflow  onto base
@@ -98,4 +104,4 @@ branch tooling/stack                          onto base
 # the saved workflows in ComfyUI/user/default/workflows were built against.
 # verify-restack.sh checks that order explicitly - do not reorder these two
 # without re-running it.
-assemble tooling/stack fix/xfuser-version-bound fix/dead-actor-recovery fix/ring-attention-lse-padding fix/worker-nvrtc-library-path fix/parallel-quant-shard-load fix/forward-fast-disk-to-workers fix/sampler-progress fix/worker-vram-release-on-failure fix/sampler-cancel fix/offload-quantized-fsdp-shards fix/free-host-vram-before-shard-load fix/keep-host-models-when-gpus-pinned feat/vae-temporal-chunk-decode fix/decode-cancel fix/mlp-chunk feat/minimax-h3-fp16 feat/minimax-h3-fp16-node-inputs feat/numa-aware-worker-placement feat/lora-bypass-operand-placement feat/rank-gpu-pinning fix/ray-kill-without-model-load fix/worker-pinned-memory-selectable feat/worker-vram-tunables-in-workflow feat/initializer-input-ux
+assemble tooling/stack fix/xfuser-version-bound fix/dead-actor-recovery fix/ring-attention-lse-padding fix/worker-nvrtc-library-path fix/parallel-quant-shard-load fix/forward-fast-disk-to-workers fix/sampler-progress fix/worker-vram-release-on-failure fix/sampler-cancel fix/offload-quantized-fsdp-shards fix/free-host-vram-before-shard-load fix/keep-host-models-when-gpus-pinned feat/vae-temporal-chunk-decode fix/decode-cancel fix/mlp-chunk feat/minimax-h3-fp16 feat/minimax-h3-fp16-node-inputs feat/numa-aware-worker-placement feat/lora-bypass-operand-placement feat/rank-gpu-pinning fix/ray-kill-without-model-load fix/worker-pinned-memory-selectable feat/worker-vram-tunables-in-workflow feat/initializer-input-ux fix/ck-patch-scope-nesting feat/fsdp-text-encoder
