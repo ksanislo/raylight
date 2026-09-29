@@ -62,6 +62,7 @@ branch fix/keep-host-models-when-gpus-pinned  onto base
 # That is why cancellation is two branches, not one.
 branch feat/vae-temporal-chunk-decode         onto base
 branch fix/decode-cancel                      onto feat/vae-temporal-chunk-decode
+branch feat/vae-decode-controls               onto feat/vae-temporal-chunk-decode
 
 # -- features, all off by default --------------------------------------------
 # fix/mlp-chunk owns the _mlp_branch extraction so the single pass and the per
@@ -80,10 +81,18 @@ branch feat/numa-aware-worker-placement       onto base
 branch feat/lora-bypass-operand-placement     onto base
 branch feat/rank-gpu-pinning                  onto base
 branch fix/ck-patch-scope-nesting             onto base
+branch fix/quant-loader-requires-grad        onto base
 branch fix/ray-kill-without-model-load        onto base
 branch fix/worker-pinned-memory-selectable    onto base
 branch feat/worker-vram-tunables-in-workflow  onto base
 branch feat/initializer-input-ux              onto feat/worker-vram-tunables-in-workflow
+
+# tooling/crash-trace is NOT declared as a PR branch and is NOT in the build. Its
+# markers sit in code owned by two different feature branches (encode_tokens from
+# feat/fsdp-text-encoder, the decode path from feat/vae-temporal-chunk-decode), so it
+# has no single base to rebase onto. It is built on top of an assembled main when a
+# crash is being chased and rebuilt from scratch afterwards. An fsync per marker costs
+# ~280 us and a shard load is ~1600 of them, so take it back out before quoting timing.
 
 # tooling/fsdp-probes is deliberately NOT in the build: it is measurement
 # scaffolding and any timing taken with it armed is unquotable.
@@ -104,4 +113,4 @@ branch tooling/stack                          onto base
 # the saved workflows in ComfyUI/user/default/workflows were built against.
 # verify-restack.sh checks that order explicitly - do not reorder these two
 # without re-running it.
-assemble tooling/stack fix/xfuser-version-bound fix/dead-actor-recovery fix/ring-attention-lse-padding fix/worker-nvrtc-library-path fix/parallel-quant-shard-load fix/forward-fast-disk-to-workers fix/sampler-progress fix/worker-vram-release-on-failure fix/sampler-cancel fix/offload-quantized-fsdp-shards fix/free-host-vram-before-shard-load fix/keep-host-models-when-gpus-pinned feat/vae-temporal-chunk-decode fix/decode-cancel fix/mlp-chunk feat/minimax-h3-fp16 feat/minimax-h3-fp16-node-inputs feat/numa-aware-worker-placement feat/lora-bypass-operand-placement feat/rank-gpu-pinning fix/ray-kill-without-model-load fix/worker-pinned-memory-selectable feat/worker-vram-tunables-in-workflow feat/initializer-input-ux fix/ck-patch-scope-nesting feat/fsdp-text-encoder
+assemble tooling/stack fix/xfuser-version-bound fix/dead-actor-recovery fix/ring-attention-lse-padding fix/worker-nvrtc-library-path fix/parallel-quant-shard-load fix/forward-fast-disk-to-workers fix/sampler-progress fix/worker-vram-release-on-failure fix/sampler-cancel fix/offload-quantized-fsdp-shards fix/free-host-vram-before-shard-load fix/keep-host-models-when-gpus-pinned feat/vae-temporal-chunk-decode fix/decode-cancel fix/mlp-chunk feat/minimax-h3-fp16 feat/minimax-h3-fp16-node-inputs feat/numa-aware-worker-placement feat/lora-bypass-operand-placement feat/rank-gpu-pinning fix/ray-kill-without-model-load fix/worker-pinned-memory-selectable feat/worker-vram-tunables-in-workflow feat/initializer-input-ux fix/ck-patch-scope-nesting feat/fsdp-text-encoder fix/quant-loader-requires-grad feat/vae-decode-controls
