@@ -1262,3 +1262,79 @@ def fsdp_load_diffusion_model_stat_dict(sd, rank, device_mesh, is_cpu_offload, m
     state_dict = model_patcher.model_state_dict(filter_prefix="diffusion_model.")
     model_patcher.model.diffusion_model.to("meta")
     return model_patcher, state_dict
+
+
+def fsdp_load_text_encoder(clip_path, clip_type, rank, device_mesh, is_cpu_offload,
+                           embedding_directory=None, model_options={}):
+    """Build a text encoder and hand its transformer stack to FSDP.
+
+    The encoder is the one model here that never fit a card: the 32B Qwen3-VL is
+    25 GiB at int8 and 48 GiB at bf16 against 15.56 GiB, so every encode pages it
+    through host memory. Sharding it puts a rank's slice in each card's own vram
+    instead.
+
+    Returns (clip, model_patcher, state_dict). The tokenizer stays whole on the
+    caller's side; only the transformer is sharded.
+    """
+    #comfy.sd is not bound by a plain `import comfy`, and this module only has that.
+    import comfy.sd
+
+    clip = comfy.sd.load_clip(
+        ckpt_paths=[clip_path],
+        embedding_directory=embedding_directory,
+        clip_type=clip_type,
+        model_options=model_options,
+    )
+
+    text_encoder = clip.cond_stage_model
+    #SD1ClipModel records the attribute it stored the model under, so the path
+    #to the transformer is discoverable rather than hardcoded per encoder.
+    inner_name = getattr(text_encoder, "clip", None)
+    if inner_name is None or not hasattr(text_encoder, inner_name):
+        raise RuntimeError(
+            "Cannot locate the transformer inside {}: no '.clip' attribute naming it".format(
+                type(text_encoder).__name__))
+    shard_target = "{}.transformer".format(inner_name)
+
+    load_device = model_management.text_encoder_device()
+    offload_device = model_management.text_encoder_offload_device()
+
+    model_patcher = comfy_dist.model_patcher.FSDPModelPatcher(
+        text_encoder,
+        load_device=load_device,
+        offload_device=offload_device,
+        rank=rank,
+        device_mesh=device_mesh,
+        is_cpu_offload=is_cpu_offload,
+    )
+    model_patcher.shard_target = shard_target
+    #sd1_clip calls get_input_embeddings() directly, outside the transformer's
+    #forward, so the embedding cannot be sharded: no pre-hook would run to gather
+    #it. Replicating it costs each rank the embedding table and nothing else.
+    try:
+        embedding = comfy_dist.model_patcher.shard_root(model_patcher).get_input_embeddings()
+    except AttributeError:
+        embedding = None
+    if embedding is not None:
+        model_patcher.shard_excluded_modules = {embedding}
+
+    state_dict = model_patcher.model_state_dict(filter_prefix="{}.".format(shard_target))
+
+    #Buffers are not parameters and several are non-persistent, so they are in no
+    #state dict and nothing would materialize them again. Rotary inverse
+    #frequencies are the usual case. Keep them and put them back after the move.
+    root = comfy_dist.model_patcher.shard_root(model_patcher)
+    saved_buffers = {name: buf.clone() for name, buf in root.named_buffers(recurse=True)
+                     if buf is not None and not buf.is_meta}
+    root.to("meta")
+    for name, buf in saved_buffers.items():
+        parent = root
+        parts = name.split(".")
+        for part in parts[:-1]:
+            parent = getattr(parent, part)
+        setattr(parent, parts[-1], buf)
+
+    #CLIP.encode_from_tokens loads through clip.patcher, so it has to be the FSDP
+    #one or the encode would try to move the meta'd model the ordinary way.
+    clip.patcher = model_patcher
+    return clip, model_patcher, state_dict
