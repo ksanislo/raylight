@@ -18,7 +18,7 @@ from comfy.patcher_extension import CallbacksMP
 from comfy.model_patcher import get_key_weight, string_to_seed, move_weight_functions
 
 from raylight import comfy_dist
-from .fsdp_utils import freeze_and_detect_qt, fully_shard_bottom_up, load_from_full_model_state_dict, materialize_excluded_params
+from .fsdp_utils import freeze_and_detect_qt, fully_shard_bottom_up, load_from_full_model_state_dict, materialize_excluded_params, materialize_remaining_meta_params
 from .kitchen_distributed import temporary_sitepkg_ck_patches
 
 if TYPE_CHECKING:
@@ -400,6 +400,18 @@ def patch_fsdp(self):
             )
             if count > 0:
                 print(f"[Rank {self.rank}] Materialized {count} excluded ControlNet-shared params on {target_device}")
+
+        #Ignored params - the quantization scales - belong to neither the sharded
+        #set nor the excluded modules, so they are still on meta here and FSDP's
+        #own check at lazy_init would reject them.
+        leftover = materialize_remaining_meta_params(
+            model=self.model,
+            full_sd=self.fsdp_state_dict,
+            device=target_device,
+            cpu_offload=self.is_cpu_offload,
+        )
+        if leftover > 0:
+            print(f"[Rank {self.rank}] Materialized {leftover} ignored param(s) left on meta")
 
         _pre_init_fsdp(diffusion_model)
     self.fsdp_state_dict = None
