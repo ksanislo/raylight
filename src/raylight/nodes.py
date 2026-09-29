@@ -1759,12 +1759,10 @@ class RayVAEDecodeDistributed:
                     },
                 ),
                 "decode_ranks": (
-                    "INT",
+                    "STRING",
                     {
-                        "default": 0,
-                        "min": 0,
-                        "max": 16,
-                        "tooltip": "How many ranks share the decode. 0 uses every worker. Fewer ranks decode more slowly but put fewer cards on the bus at once.",
+                        "default": "",
+                        "tooltip": "Which ranks share the decode, as a comma separated list - 0,1 or 2,3 or 1. Empty uses every worker. Ranks map to the cards named in GPU_SELECT when pin_ranks_to_gpus is on, so this chooses the cards. Fewer cards decode more slowly but put fewer of them on the bus at once.",
                     },
                 ),
             }
@@ -1778,14 +1776,20 @@ class RayVAEDecodeDistributed:
     # -- Komikndr
     # By default VAE on comfy already "Parallelized" through tiling, so just distributed the tiling to other rank
     def ray_decode(self, ray_actors, vae_name, samples, tile_size, overlap=64, temporal_size=64,
-                   temporal_overlap=8, vae_full_load=False, decode_ranks=0):
+                   temporal_overlap=8, vae_full_load=False, decode_ranks=""):
         gpu_actors = ray_actors["workers"]
         if not gpu_actors:
             raise ValueError("Distributed VAE (Ray) requires at least one Ray worker.")
-        #Sliced before the VAE is loaded, so a reduced fan-out also means fewer
+        #Selected before the VAE is loaded, so a reduced set also means fewer
         #cards holding a copy of it.
-        if decode_ranks > 0:
-            gpu_actors = gpu_actors[:decode_ranks]
+        chosen = [int(part) for part in str(decode_ranks).split(",") if part.strip()]
+        if chosen:
+            out_of_range = [r for r in chosen if not 0 <= r < len(ray_actors["workers"])]
+            if out_of_range:
+                raise ValueError(
+                    "decode_ranks names rank(s) {} but there are {} workers".format(
+                        out_of_range, len(ray_actors["workers"])))
+            gpu_actors = [ray_actors["workers"][r] for r in chosen]
         vae_path = folder_paths.get_full_path_or_raise("vae", vae_name)
 
         for actor in gpu_actors:
