@@ -1264,6 +1264,70 @@ def fsdp_load_diffusion_model_stat_dict(sd, rank, device_mesh, is_cpu_offload, m
     return model_patcher, state_dict
 
 
+def _resolve_attr_path(root, dotted):
+    for part in dotted.split("."):
+        root = getattr(root, part)
+    return root
+
+
+def _encoder_needs_offload(root, embedding, device_mesh, device):
+    """Decide whether this encoder's shards can live in vram on this card.
+
+    Sharding divides the transformer by the mesh size, but a module held out of
+    the sharding is replicated, so it costs its full size on every rank. What is
+    free is measured now rather than assumed: the diffusion model is usually
+    already resident, and it is the remainder that decides this.
+
+    Returns True when the shard would not fit, meaning FSDP should keep it on the
+    host and gather per layer instead of failing the load outright.
+    """
+    def _tensor_bytes(t):
+        #A quantized tensor reports the shape and dtype it stands in for, not
+        #what it stores, so packed data and its scales are measured directly.
+        qdata = getattr(t, "_qdata", None)
+        if qdata is not None:
+            total = qdata.numel() * qdata.element_size()
+            scale = getattr(getattr(t, "_params", None), "scale", None)
+            if isinstance(scale, torch.Tensor):
+                total += scale.numel() * scale.element_size()
+            return total
+        return t.numel() * t.element_size()
+
+    def _bytes(module):
+        total = 0
+        for t in list(module.parameters()) + list(module.buffers()):
+            if t is not None and not t.is_meta:
+                try:
+                    total += _tensor_bytes(t)
+                except Exception:
+                    pass
+        return total
+
+    try:
+        world = int(device_mesh.size())
+    except Exception:
+        world = 1
+    world = max(world, 1)
+
+    replicated = _bytes(embedding) if embedding is not None else 0
+    sharded = max(_bytes(root) - replicated, 0)
+    per_rank = sharded // world + replicated
+
+    try:
+        free = model_management.get_free_memory(device)
+    except Exception:
+        return False
+
+    #Room for activations and the gather buffers on top of the weights; without
+    #it the load succeeds and the first forward is what runs out.
+    needed = int(per_rank * 1.15) + (1 << 30)
+    fits = needed < free
+    print("[Raylight] text encoder shard {:.2f} GiB/rank, {:.2f} GiB free, {}".format(
+        per_rank / (1 << 30), free / (1 << 30),
+        "in vram" if fits else "CPU offload"))
+    return not fits
+
+
 def fsdp_load_text_encoder(clip_path, clip_type, rank, device_mesh, is_cpu_offload,
                            embedding_directory=None, model_options={}):
     """Build a text encoder and hand its transformer stack to FSDP.
@@ -1299,6 +1363,21 @@ def fsdp_load_text_encoder(clip_path, clip_type, rank, device_mesh, is_cpu_offlo
     load_device = model_management.text_encoder_device()
     offload_device = model_management.text_encoder_offload_device()
 
+    #sd1_clip calls get_input_embeddings() directly, outside the transformer's
+    #forward, so the embedding cannot be sharded: no pre-hook would run to gather
+    #it. Replicating it costs each rank the embedding table and nothing else.
+    shard_root_module = _resolve_attr_path(text_encoder, shard_target)
+    try:
+        embedding = shard_root_module.get_input_embeddings()
+    except AttributeError:
+        embedding = None
+
+    #An explicit offload setting is honoured; otherwise offload only if the
+    #shard will not fit beside whatever is already on the card.
+    if not is_cpu_offload:
+        is_cpu_offload = _encoder_needs_offload(
+            shard_root_module, embedding, device_mesh, load_device)
+
     model_patcher = comfy_dist.model_patcher.FSDPModelPatcher(
         text_encoder,
         load_device=load_device,
@@ -1308,13 +1387,6 @@ def fsdp_load_text_encoder(clip_path, clip_type, rank, device_mesh, is_cpu_offlo
         is_cpu_offload=is_cpu_offload,
     )
     model_patcher.shard_target = shard_target
-    #sd1_clip calls get_input_embeddings() directly, outside the transformer's
-    #forward, so the embedding cannot be sharded: no pre-hook would run to gather
-    #it. Replicating it costs each rank the embedding table and nothing else.
-    try:
-        embedding = comfy_dist.model_patcher.shard_root(model_patcher).get_input_embeddings()
-    except AttributeError:
-        embedding = None
     if embedding is not None:
         model_patcher.shard_excluded_modules = {embedding}
 
