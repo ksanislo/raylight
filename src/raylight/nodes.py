@@ -1594,6 +1594,93 @@ class RayControlNetApply:
         return (out[0], out[1])
 
 
+class RayCLIP:
+    """Host-side stand-in for a CLIP whose transformer lives on the workers.
+
+    Tokenizing is cheap and needs the vocabulary, so it stays here. The forward
+    is what costs, so it goes to the ranks and only token ids and the resulting
+    conditioning cross the wire - a few hundred tokens each way against a model
+    that does not fit a card.
+    """
+
+    def __init__(self, ray_actors, tokenizer, clip_path, clip_type):
+        self.ray_actors = ray_actors
+        self.tokenizer = tokenizer
+        self.clip_path = clip_path
+        self.clip_type = clip_type
+        self.layer_idx = None
+        self.use_clip_schedule = False
+
+    def tokenize(self, text, return_word_ids=False, **kwargs):
+        return self.tokenizer.tokenize_with_weights(text, return_word_ids, **kwargs)
+
+    def encode_from_tokens(self, tokens, return_pooled=False, return_dict=False):
+        workers = self.ray_actors["workers"]
+        results = ray.get([actor.encode_tokens.remote(tokens) for actor in workers])
+        out = next(r for r in results if r is not None)
+        if return_dict:
+            return out
+        cond = out["cond"]
+        return (cond, out.get("pooled_output")) if return_pooled else cond
+
+    def encode_from_tokens_scheduled(self, tokens, unprojected=False, add_dict={}, show_pbar=True):
+        out = self.encode_from_tokens(tokens, return_pooled=True, return_dict=True)
+        pooled = out.get("pooled_output")
+        extra = {k: v for k, v in out.items() if k not in ("cond",)}
+        extra.update(add_dict)
+        if pooled is not None:
+            extra["pooled_output"] = pooled
+        return [[out["cond"], extra]]
+
+    def load_model(self):
+        return self
+
+    def get_key_patches(self):
+        return {}
+
+
+class RayCLIPLoader:
+    """Load a text encoder into all Ray workers as FSDP shards.
+
+    The 32B encoder never fits a card - 25 GiB at int8, 48 GiB at bf16 against
+    15.56 GiB - so on one GPU every encode pages it through host memory. Sharded,
+    each rank holds its own slice.
+    """
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "ray_actors": ("RAY_ACTORS",),
+                "clip_name": (folder_paths.get_filename_list("text_encoders"),),
+                "type": (["minimax"],),
+            }
+        }
+
+    RETURN_TYPES = ("CLIP",)
+    RETURN_NAMES = ("clip",)
+    FUNCTION = "load_clip"
+    CATEGORY = "Raylight"
+
+    def load_clip(self, ray_actors, clip_name, type):
+        import comfy.sd
+        import comfy.text_encoders.minimax
+
+        clip_path = folder_paths.get_full_path_or_raise("text_encoders", clip_name)
+        clip_type = comfy.sd.CLIPType.MINIMAX
+
+        gpu_actors = ray_actors["workers"]
+        #CLIPType is a plain Enum, so it neither survives int() nor pickles as
+        #something the worker can rebuild by identity. Send the value.
+        ray.get([actor.load_clip.remote(clip_path, clip_type.value) for actor in gpu_actors])
+
+        #The tokenizer is built here, not fetched from a worker: it is small, and
+        #shipping one back would mean pickling the vocabulary.
+        tokenizer = comfy.text_encoders.minimax.MiniMaxH3Tokenizer(
+            embedding_directory=folder_paths.get_folder_paths("embeddings"))
+        return (RayCLIP(ray_actors, tokenizer, clip_path, clip_type),)
+
+
 class RayVAELoader:
     """Load a VAE model into all Ray workers.
 
@@ -1860,6 +1947,7 @@ NODE_CLASS_MAPPINGS = {
     "RayLoraLoader": RayLoraLoader,
     "RayControlNetLoader": RayControlNetLoader,
     "RayControlNetApply": RayControlNetApply,
+    "RayCLIPLoader": RayCLIPLoader,
     "RayVAELoader": RayVAELoader,
     "RayCleanVRAMUsed": RayCleanVRAMUsed,
     "RayInitializer": RayInitializer,
@@ -1880,6 +1968,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RayLoraLoader": "Load Lora Model (Ray)",
     "RayControlNetLoader": "Load ControlNet (Ray)",
     "RayControlNetApply": "Apply ControlNet (Ray)",
+    "RayCLIPLoader": "Load CLIP (Ray)",
     "RayVAELoader": "Load VAE (Ray)",
     "RayCleanVRAMUsed": "Clean VRAM Used (Raylight)",
     "RayInitializer": "Ray Init Actor",
