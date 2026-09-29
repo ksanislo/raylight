@@ -154,7 +154,8 @@ def _normalize_latents(model, z):
     return z * latents_std + latents_mean
 
 
-def ray_vae_decode_temporal_partial_impl(worker, samples, job_rank=0, job_world_size=1):
+def ray_vae_decode_temporal_partial_impl(worker, samples, job_rank=0, job_world_size=1,
+                                         full_load=False):
     import comfy.model_management as model_management
 
     _validate_job_rank(job_rank, job_world_size)
@@ -174,7 +175,10 @@ def ray_vae_decode_temporal_partial_impl(worker, samples, job_rank=0, job_world_
         raise ValueError(f"Distributed VAE (Ray) temporal decode expects a 5D latent, got {latent.ndim}D.")
 
     memory_used = vae.memory_used_decode(latent.shape, vae.vae_dtype)
-    model_management.load_models_gpu([vae.patcher], memory_required=memory_used, force_full_load=vae.disable_offload)
+    #A partially loaded VAE streams the rest of its weights from the host while
+    #it decodes, on every participating rank at once.
+    force_full = bool(full_load) or vae.disable_offload
+    model_management.load_models_gpu([vae.patcher], memory_required=memory_used, force_full_load=force_full)
 
     output_shape = tuple(model.decode_output_shape(latent.shape))
 

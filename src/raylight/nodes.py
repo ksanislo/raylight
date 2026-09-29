@@ -1751,6 +1751,22 @@ class RayVAEDecodeDistributed:
                         "tooltip": "Retained for workflow compatibility. Distributed video decoding always keeps the complete temporal sequence on one worker; this value is not used for tiling.",
                     },
                 ),
+                "vae_full_load": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Hold the whole VAE in vram for the decode. Off, a partially loaded VAE streams the rest of its weights from the host while it decodes. On, the decode needs room for the whole VAE instead.",
+                    },
+                ),
+                "decode_ranks": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 16,
+                        "tooltip": "How many ranks share the decode. 0 uses every worker. Fewer ranks decode more slowly but put fewer cards on the bus at once.",
+                    },
+                ),
             }
         }
 
@@ -1761,10 +1777,15 @@ class RayVAEDecodeDistributed:
 
     # -- Komikndr
     # By default VAE on comfy already "Parallelized" through tiling, so just distributed the tiling to other rank
-    def ray_decode(self, ray_actors, vae_name, samples, tile_size, overlap=64, temporal_size=64, temporal_overlap=8):
+    def ray_decode(self, ray_actors, vae_name, samples, tile_size, overlap=64, temporal_size=64,
+                   temporal_overlap=8, vae_full_load=False, decode_ranks=0):
         gpu_actors = ray_actors["workers"]
         if not gpu_actors:
             raise ValueError("Distributed VAE (Ray) requires at least one Ray worker.")
+        #Sliced before the VAE is loaded, so a reduced fan-out also means fewer
+        #cards holding a copy of it.
+        if decode_ranks > 0:
+            gpu_actors = gpu_actors[:decode_ranks]
         vae_path = folder_paths.get_full_path_or_raise("vae", vae_name)
 
         for actor in gpu_actors:
@@ -1778,6 +1799,7 @@ class RayVAEDecodeDistributed:
                     samples,
                     job_rank=i,
                     job_world_size=len(gpu_actors),
+                    full_load=vae_full_load,
                 )
                 for i, actor in enumerate(gpu_actors)
             ]
