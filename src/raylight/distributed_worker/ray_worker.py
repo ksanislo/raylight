@@ -556,6 +556,13 @@ class RayWorker:
         self.vae_model = None
         self.model_type = None
         self.state_dict = None
+        #The text encoder gets its own slot rather than sharing the diffusion
+        #model's: the two are wanted at different times, and keeping them apart
+        #lets whichever is idle be the one that gives up vram under pressure.
+        self.clip = None
+        self.clip_patcher = None
+        self.clip_state_dict = None
+        self.clip_key = None
         self.cached_controlnet = None  # (path, controlnet_object) cache
         self.lora_list = None
         self.parallel_dict = parallel_dict
@@ -730,6 +737,11 @@ class RayWorker:
             comfy_model_management.unload_all_models()
         except Exception as e:
             print(f"[Rank {self.local_rank}] unload_all_models failed in clear_sampling_vram: {e}")
+
+        #The encoder has already run by the time sampling is done with the card,
+        #so it is the one to give up vram first. Offload rather than free: the
+        #next prompt change restores the shards instead of reloading them.
+        self.offload_clip_vram()
 
         if self.model is not None and hasattr(self.model, "offload_fsdp_vram"):
             try:
@@ -1023,6 +1035,95 @@ class RayWorker:
             PIPEFUSION_WRAPPER_KEY,
             pipefusion_diffusion_model_wrapper,
         )
+
+    def load_clip(self, clip_path, clip_type, model_options=None):
+        """Shard a text encoder across the ranks.
+
+        Mirrors load_unet: the encoder's transformer is built on meta, each rank
+        keeps its own slice, and the gathers happen per layer at encode time.
+        Reloading the same encoder is a no-op so a prompt change does not pay for
+        it twice.
+        """
+        import comfy.sd as comfy_sd
+
+        model_options = dict(model_options or {})
+        #Arrives as the enum's value; rebuild it for load_clip.
+        clip_type = comfy_sd.CLIPType(clip_type)
+        key = (clip_path, clip_type.value, self._normalize_model_options(model_options))
+        if self.clip is not None and self.clip_key == key:
+            return
+
+        self._free_current_clip()
+
+        from raylight.comfy_dist.sd import fsdp_load_text_encoder
+
+        self.clip, self.clip_patcher, self.clip_state_dict = fsdp_load_text_encoder(
+            clip_path,
+            clip_type,
+            self.local_rank,
+            self.device_mesh,
+            self.is_cpu_offload,
+            model_options=model_options,
+        )
+        self.clip_key = key
+
+    def set_clip_state_dict(self):
+        if self.clip_state_dict is None:
+            raise ValueError("Worker clip_state_dict is None before set_clip_state_dict")
+        self.clip_patcher.set_fsdp_state_dict(self.clip_state_dict)
+        self.clip_state_dict = None
+
+    def _free_current_clip(self):
+        """Give up the encoder's shards. Called when it is replaced, and by the
+        vram pressure paths - the encoder is usually the idle model by the time
+        sampling wants the card."""
+        if self.clip_patcher is not None and hasattr(self.clip_patcher, "free_fsdp_vram"):
+            try:
+                self.clip_patcher.free_fsdp_vram()
+            except Exception as e:
+                print(f"[Rank {self.local_rank}] free_fsdp_vram failed for the text encoder: {e}")
+        self.clip = None
+        self.clip_patcher = None
+        self.clip_state_dict = None
+        self.clip_key = None
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    def offload_clip_vram(self):
+        """Move the encoder's shards to the host but keep them, so the next
+        encode restores rather than reloads."""
+        if self.clip_patcher is not None and hasattr(self.clip_patcher, "offload_fsdp_vram"):
+            try:
+                self.clip_patcher.offload_fsdp_vram()
+            except Exception as e:
+                print(f"[Rank {self.local_rank}] offload_fsdp_vram failed for the text encoder: {e}")
+
+    @patch_temp_fix_ck_ops
+    @patch_enable_comfy_kitchen_fsdp
+    def encode_tokens(self, tokens):
+        """Run the sharded encoder over already-tokenized input.
+
+        Carries the same decorators as the samplers: the comfy_kitchen quant
+        layouts only gain their FSDP all-gather protocol while those patches are
+        installed, and an encode gathers sharded quantized weights just as a
+        sampling step does.
+
+        The tokenizer stays on the caller's side, so what crosses is token ids in
+        and the conditioning out - a few hundred tokens either way, which is why
+        this is worth doing collectively even though the model is huge.
+        """
+        if self.clip is None:
+            raise RuntimeError("encode_tokens called before load_clip")
+        if self.clip_state_dict is not None:
+            self.set_clip_state_dict()
+
+        #clip.patcher is the FSDP patcher, so encode_from_tokens loads and shards
+        #on its own; loading here first would only do it twice.
+        out = self.clip.encode_from_tokens(tokens, return_pooled=True, return_dict=True)
+        #Only rank 0's copy is returned; every rank computes the same thing.
+        if self.local_rank != 0:
+            return None
+        return {k: (v.to("cpu") if torch.is_tensor(v) else v) for k, v in out.items()}
 
     def load_unet(self, unet_path, model_options):
         if self.parallel_dict["is_fsdp"] is True:
