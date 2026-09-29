@@ -309,6 +309,36 @@ def fully_shard_bottom_up(
     return num_layers_sharded
 
 
+def materialize_remaining_meta_params(
+    model: torch.nn.Module,
+    full_sd: dict[str, Any],
+    device: torch.device,
+    cpu_offload: bool = False,
+) -> int:
+    """Materialize any parameter still on meta after the shards are loaded.
+
+    The shard loader fills the parameters FSDP owns, and excluded modules are
+    handled separately, but a parameter passed to fully_shard as ignored_params
+    belongs to neither group and stays on meta. Quantization scales are ignored
+    that way, so a format carrying an extra one - AWQ's pre_quant_scale, for
+    instance - trips FSDP's own meta check at lazy_init.
+
+    Returns the number of parameters materialized.
+    """
+    count = 0
+    for full_name, param in list(model.named_parameters(recurse=True)):
+        if isinstance(param, DTensor):
+            continue
+        if not param.is_meta:
+            continue
+        full_tensor = full_sd.get(full_name)
+        if full_tensor is None:
+            continue
+        _materialize_unsharded_param(model, full_name, param, full_tensor, device, cpu_offload)
+        count += 1
+    return count
+
+
 def materialize_excluded_params(
     model: torch.nn.Module,
     excluded_modules: set[torch.nn.Module],
