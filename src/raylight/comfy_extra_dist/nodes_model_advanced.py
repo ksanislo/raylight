@@ -532,6 +532,11 @@ class RayModelAttentionBackend:
                     "tooltip": "Attention used inside Ulysses. Comfy Kitchen attention is INT8 and returns no "
                                "log-sum-exp, so it needs ring_degree 1.",
                 }),
+                "dense_first_steps": ("INT", {
+                    "default": 0, "min": 0, "max": 10000,
+                    "tooltip": "Run this many opening steps on dense attention before switching to "
+                               "Comfy Kitchen. The high-noise steps set composition and prompt adherence.",
+                }),
             }
         }
 
@@ -545,9 +550,10 @@ class RayModelAttentionBackend:
     CATEGORY = "Raylight/extra"
 
     @ray_patch
-    def patch(self, model, attention):
+    def patch(self, model, attention, dense_first_steps):
         if attention == "comfy kitchen attention":
-            return set_inner_attention(model, create_inner_attention("raylight:comfy_kitchen_int8"))
+            return set_inner_attention(model, create_inner_attention(
+                "raylight:comfy_kitchen_int8", dense_first_steps=dense_first_steps))
         return clear_inner_attention(model, ComfyKitchenInt8Attention)
 
 
