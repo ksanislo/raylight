@@ -1449,6 +1449,53 @@ class RayWorker:
         self.vae_model = vae_model
         self._cached_vae_path = vae_path
 
+    def ray_minimax_h3_fun_control_apply(self, patch_name, strength, start_percent, end_percent,
+                                         control_video=None, mask=None, source_video=None):
+        """Register a MiniMax H3 Fun ControlNet on this worker's model.
+
+        The patch hooks the diffusion forward itself, so it has to live where the model
+        does. The control latent is encoded lazily at the first forward, which is why the
+        worker needs its own VAE - the target shape is only known once sampling starts.
+        """
+        from comfy_extras.nodes_model_patch import ModelPatchLoader
+        from comfy_extras.nodes_minimax_h3 import MiniMaxH3FunControlPatch
+
+        if self.vae_model is None:
+            raise RuntimeError(
+                "MiniMax H3 Fun ControlNet needs a VAE on the worker to encode the control "
+                "video. Feed RayVAELoader's ray_vae into the apply node."
+            )
+
+        model_patch = ModelPatchLoader().load_model_patch(patch_name)[0]
+
+        # the controlnet's adaln width has to match the base model's timestep embedding, and
+        # a mismatch only surfaces mid-forward, so say so here where the name is still known
+        adaln_in = model_patch.model.control_blocks[0].adaln_proj.linear.in_features
+        base_curves = getattr(self.model.model.diffusion_model, "use_adaln_curves", None)
+        if base_curves is not None:
+            expected = 8 if base_curves else 2688
+            if adaln_in != expected:
+                raise RuntimeError(
+                    "'{}' has adaln width {} but this base model expects {}. A 'pruned' base "
+                    "uses the curve basis (8) and a full base uses 2688; pick the controlnet "
+                    "build that matches.".format(patch_name, adaln_in, expected)
+                )
+
+        model_sampling = self.model.get_model_object("model_sampling")
+        patch = MiniMaxH3FunControlPatch(
+            model_patch,
+            self.vae_model,
+            control_video,
+            mask,
+            source_video,
+            strength,
+            float(model_sampling.percent_to_sigma(start_percent)),
+            float(model_sampling.percent_to_sigma(end_percent)),
+        )
+        patched = self.model.clone()
+        patch.register(patched)
+        self.model = patched
+
     @patch_ray_tqdm
     def ray_vae_decode_partial(self, samples, tile_size, overlap=64, temporal_size=64, temporal_overlap=8, job_rank=0, job_world_size=1):
         return ray_vae_decode_partial_impl(self, samples, tile_size, overlap, temporal_size, temporal_overlap, job_rank, job_world_size)

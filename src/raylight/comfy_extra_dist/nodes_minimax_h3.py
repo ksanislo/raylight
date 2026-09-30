@@ -1,3 +1,6 @@
+import folder_paths
+import ray
+
 from .ray_patch_decorator import ray_patch
 from comfy.patcher_extension import WrappersMP
 from raylight.distributed_modules.inner_attention import (
@@ -103,12 +106,65 @@ class RayMiniMaxH3SLA:
         return model
 
 
+class RayMiniMaxH3FunControlNetApply:
+    """Apply a MiniMax H3 Fun ControlNet inside the Ray workers.
+
+    Upstream's node takes a MODEL and a loaded MODEL_PATCH and returns a patched MODEL.
+    Under Raylight the model only ever exists inside the workers, so this takes the patch
+    by NAME and each worker loads its own copy from disk - the same trade RayUNETLoader
+    makes. The control video is encoded by the worker's VAE at the first forward, when the
+    target latent shape is finally known, so ray_vae is required rather than optional.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "ray_actors": ("RAY_ACTORS",),
+                "ray_vae": ("RAY_VAE",),
+                "model_patch_name": (folder_paths.get_filename_list("model_patches"),),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01}),
+                "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.001}),
+                "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001}),
+            },
+            "optional": {
+                "control_video": ("IMAGE",),
+                "mask": ("MASK", {"tooltip": "1 marks the regions to regenerate."}),
+                "source_video": ("IMAGE", {"tooltip": "Video behind the mask; only read when a mask is given."}),
+            },
+        }
+
+    RETURN_TYPES = ("RAY_ACTORS",)
+    RETURN_NAMES = ("ray_actors",)
+    FUNCTION = "apply"
+    CATEGORY = "Raylight/extra"
+
+    def apply(self, ray_actors, ray_vae, model_patch_name, strength, start_percent, end_percent,
+              control_video=None, mask=None, source_video=None):
+        if strength == 0 or (control_video is None and mask is None):
+            return (ray_actors,)
+
+        # Same reshape upstream does, done once on the host so every worker is handed the
+        # tensor in the layout the patch expects.
+        control = control_video[..., :3].movedim(-1, 1) if control_video is not None else None
+        source = source_video[..., :3].movedim(-1, 1) if mask is not None and source_video is not None else None
+
+        ray.get([
+            actor.ray_minimax_h3_fun_control_apply.remote(
+                model_patch_name, strength, start_percent, end_percent, control, mask, source)
+            for actor in ray_actors["workers"]
+        ])
+        return (ray_actors,)
+
+
 NODE_CLASS_MAPPINGS = {
     "RayMiniMaxH3SigmaShift": RayMiniMaxH3SigmaShift,
     "RayMiniMaxH3SLA": RayMiniMaxH3SLA,
+    "RayMiniMaxH3FunControlNetApply": RayMiniMaxH3FunControlNetApply,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "RayMiniMaxH3SigmaShift": "MiniMax H3 Sigma Shift (Ray)",
     "RayMiniMaxH3SLA": "MiniMax H3 SLA Attention (Ray)",
+    "RayMiniMaxH3FunControlNetApply": "Apply MiniMax H3 Fun ControlNet (Ray)",
 }
