@@ -62,6 +62,14 @@ branch fix/keep-host-models-when-gpus-pinned  onto base
 # That is why cancellation is two branches, not one.
 branch feat/vae-temporal-chunk-decode         onto base
 branch fix/decode-cancel                      onto feat/vae-temporal-chunk-decode
+# The reserve fix edits ray_vae_decode_temporal_partial_impl, which the temporal
+# decode adds, so it chains onto it for the same reason the cancel does.
+branch fix/vae-decode-vram-reserve            onto feat/vae-temporal-chunk-decode
+# The pacer wires into that decode after the reserve fix has reshaped it. It is
+# off unless a workflow asks (decode_stagger_ms defaults to 0) and is expected to
+# come out once the reserve fix has been exercised at length: it manages WHEN each
+# card enters the host-heavy phase, and the reserve fix removes the phase.
+branch feat/decode-pacer                      onto fix/vae-decode-vram-reserve
 branch feat/vae-decode-controls               onto feat/vae-temporal-chunk-decode
 
 # -- features, all off by default --------------------------------------------
@@ -95,7 +103,10 @@ branch feat/initializer-input-ux              onto feat/worker-vram-tunables-in-
 # ~280 us and a shard load is ~1600 of them, so take it back out before quoting timing.
 
 # tooling/fsdp-probes is deliberately NOT in the build: it is measurement
-# scaffolding and any timing taken with it armed is unquotable.
+# scaffolding and any timing taken with it armed is unquotable. tooling/crash-trace
+# is out for the same reason - it fsyncs a marker per phase, which is what made it
+# useful against a host that resets without logging anything and useless for
+# timing. trial/crash-trace holds the 2026-09-29 diagnostic state.
 #
 # tooling/stack IS in the build, and has to be: PHASE 2 checks out the base and
 # cherry-picks, so unless the tooling is assembled too, the working tree loses
@@ -113,4 +124,4 @@ branch tooling/stack                          onto base
 # the saved workflows in ComfyUI/user/default/workflows were built against.
 # verify-restack.sh checks that order explicitly - do not reorder these two
 # without re-running it.
-assemble tooling/stack fix/xfuser-version-bound fix/dead-actor-recovery fix/ring-attention-lse-padding fix/worker-nvrtc-library-path fix/parallel-quant-shard-load fix/forward-fast-disk-to-workers fix/sampler-progress fix/worker-vram-release-on-failure fix/sampler-cancel fix/offload-quantized-fsdp-shards fix/free-host-vram-before-shard-load fix/keep-host-models-when-gpus-pinned feat/vae-temporal-chunk-decode fix/decode-cancel fix/mlp-chunk feat/minimax-h3-fp16 feat/minimax-h3-fp16-node-inputs feat/numa-aware-worker-placement feat/lora-bypass-operand-placement feat/rank-gpu-pinning fix/ray-kill-without-model-load fix/worker-pinned-memory-selectable feat/worker-vram-tunables-in-workflow feat/initializer-input-ux fix/ck-patch-scope-nesting feat/fsdp-text-encoder fix/quant-loader-requires-grad feat/vae-decode-controls
+assemble tooling/stack fix/xfuser-version-bound fix/dead-actor-recovery fix/ring-attention-lse-padding fix/worker-nvrtc-library-path fix/parallel-quant-shard-load fix/forward-fast-disk-to-workers fix/sampler-progress fix/worker-vram-release-on-failure fix/sampler-cancel fix/offload-quantized-fsdp-shards fix/free-host-vram-before-shard-load fix/keep-host-models-when-gpus-pinned feat/vae-temporal-chunk-decode fix/decode-cancel fix/vae-decode-vram-reserve feat/decode-pacer fix/mlp-chunk feat/minimax-h3-fp16 feat/minimax-h3-fp16-node-inputs feat/numa-aware-worker-placement feat/lora-bypass-operand-placement feat/rank-gpu-pinning fix/ray-kill-without-model-load fix/worker-pinned-memory-selectable feat/worker-vram-tunables-in-workflow feat/initializer-input-ux fix/ck-patch-scope-nesting feat/fsdp-text-encoder fix/quant-loader-requires-grad feat/vae-decode-controls
