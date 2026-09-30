@@ -5,6 +5,10 @@ import nodes
 import torch
 import node_helpers
 from .ray_patch_decorator import ray_patch
+from raylight.distributed_modules.inner_attention import (
+    ComfyKitchenInt8Attention, clear_inner_attention, create_inner_attention, int8_attention_is_available,
+    set_inner_attention,
+)
 
 
 class LCM(comfy.model_sampling.EPS):
@@ -514,6 +518,39 @@ class RayModelComputeDtype:
         return m
 
 
+class RayModelAttentionBackend:
+    @classmethod
+    def INPUT_TYPES(s):
+        backends = ["pytorch attention"]
+        if int8_attention_is_available():
+            backends.append("comfy kitchen attention")
+        return {
+            "required": {
+                "ray_actors": ("RAY_ACTORS",),
+                "attention": (backends, {
+                    "default": "pytorch attention",
+                    "tooltip": "Attention used inside Ulysses. Comfy Kitchen attention is INT8 and returns no "
+                               "log-sum-exp, so it needs ring_degree 1.",
+                }),
+            }
+        }
+
+    @classmethod
+    def VALIDATE_INPUTS(s, attention):
+        return True
+
+    RETURN_TYPES = ("RAY_ACTORS",)
+    RETURN_NAMES = ("ray_actors",)
+    FUNCTION = "patch"
+    CATEGORY = "Raylight/extra"
+
+    @ray_patch
+    def patch(self, model, attention):
+        if attention == "comfy kitchen attention":
+            return set_inner_attention(model, create_inner_attention("raylight:comfy_kitchen_int8"))
+        return clear_inner_attention(model, ComfyKitchenInt8Attention)
+
+
 NODE_CLASS_MAPPINGS = {
     "RayModelSamplingDiscrete": RayModelSamplingDiscrete,
     "RayModelSamplingContinuousEDM": RayModelSamplingContinuousEDM,
@@ -525,6 +562,7 @@ NODE_CLASS_MAPPINGS = {
     "RayModelSamplingFlux": RayModelSamplingFlux,
     "RayRescaleCFG": RayRescaleCFG,
     "RayModelComputeDtype": RayModelComputeDtype,
+    "RayModelAttentionBackend": RayModelAttentionBackend,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -538,4 +576,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RayModelSamplingFlux": "ModelSamplingFlux (Ray)",
     "RayRescaleCFG": "RescaleCFG (Ray)",
     "RayModelComputeDtype": "ModelComputeDtype (Ray)",
+    "RayModelAttentionBackend": "Model Attention Backend (Ray)",
 }
