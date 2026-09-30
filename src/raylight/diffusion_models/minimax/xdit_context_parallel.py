@@ -53,11 +53,16 @@ def _fp32_residual():
     return os.environ.get("RAYLIGHT_FP32_RESIDUAL") == "1"
 
 
-def _run_control_patch(patch, args, block_wrap, full_size):
+def _run_control_patch(patch, args, block_wrap, full_size, full_rope_freqs, full_mod_segments):
+    # The control blocks are a separate module tree, so they never get usp_attn_forward and
+    # run dense over the whole sequence. img is gathered for them - and the rope table and
+    # mod segments have to come along, or the control stream meets a rope table cut to this
+    # rank's slice and the two disagree by exactly the sequence-parallel world size.
     local_size = args["img"].shape[0]
     with comfy.model_prefetch.pause_malloc_graph():
         full_h = get_sp_group().all_gather(args["img"].contiguous(), dim=0)[:full_size]
-        full_args = {**args, "img": full_h}
+        full_args = {**args, "img": full_h,
+                     "rope_freqs": full_rope_freqs, "mod_segments": full_mod_segments}
         patch.control_patch.before_block(patch.block_index, full_args)
     out = patch.previous(args, {"original_block": block_wrap}) if patch.previous is not None else block_wrap(args)
     with comfy.model_prefetch.pause_malloc_graph():
@@ -338,6 +343,9 @@ def usp_dit_forward(self, x, timestep, context, transformer_options={}, minimax_
     # ===================== SP SPLIT ====================== #
     h, h_orig_size = pad_to_world_size(h, dim=0)
     rope_freqs, _ = pad_to_world_size(rope_freqs, dim=1)
+    # kept for a control patch, which runs against the gathered sequence
+    full_rope_freqs = rope_freqs[:, :h_orig_size]
+    full_mod_segments = mod_segments
     h, rope_freqs, mod_segments = _split_packed_sequence(h, rope_freqs, mod_segments)
 
     # blocks
@@ -361,7 +369,8 @@ def usp_dit_forward(self, x, timestep, context, transformer_options={}, minimax_
                     "layout": layout, "transformer_options": transformer_options}
             patch = blocks_replace[("double_block", i)]
             if isinstance(patch, MiniMaxH3FunControlBlockPatch) and patch.control_patch.active:
-                h = _run_control_patch(patch, args, block_wrap, h_orig_size)
+                h = _run_control_patch(patch, args, block_wrap, h_orig_size,
+                                       full_rope_freqs, full_mod_segments)
             else:
                 h = patch(args, {"original_block": block_wrap})["img"]
         else:
