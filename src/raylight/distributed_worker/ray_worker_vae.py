@@ -1,3 +1,6 @@
+import contextlib
+import logging
+
 import torch
 
 import comfy.model_management as comfy_model_management
@@ -157,6 +160,62 @@ def _normalize_latents(model, z):
     return z * latents_std + latents_mean
 
 
+
+#Workers run with a VRAM reserve sized for sampling, where it keeps the diffusion
+#model's shards from being pulled onto the card. It applies to a decode as well,
+#and there it does the same thing to the VAE: comfy's ops fault each weight in
+#over the bus and release it again, so the card holds a fraction of the model and
+#streams the rest for the decode's whole length. Dropping the reserve while the
+#decode runs lets the weights stay where they are, and a weight already resident
+#costs nothing to fault.
+_DECODE_VRAM_RESERVE = 0
+
+#The activation figure below is an estimate, and on a card the VAE would nearly
+#fill there is nothing to absorb one that reads low - so the cushion is sized to
+#decline those rather than to fit them.
+_DECODE_VRAM_CUSHION = 2 * 1024 * 1024 * 1024
+
+
+@contextlib.contextmanager
+def _decode_vram_reserve(vae, memory_used):
+    """Drop the worker's VRAM reserve for the decode where the card can spare it.
+
+    What matters is how much of the card is free when the decode starts, not why -
+    a small card whose shards are still resident and a large one that simply has
+    room to spare are the same question answered by the same measurement. So the
+    room is measured rather than inferred from the configuration, and a card that
+    does not have it keeps its reserve and streams exactly as it always has.
+    """
+    try:
+        import comfy.model_management as model_management
+        import comfy_aimdo.control as aimdo_control
+        previous = aimdo_control.get_simple_vram_headroom()
+        required = vae.patcher.model_size() + memory_used + _DECODE_VRAM_CUSHION
+        free = model_management.get_free_memory(vae.device)
+    except Exception as exc:
+        logging.warning("[Raylight] could not size the decode, keeping the VRAM reserve: %s", exc)
+        yield
+        return
+
+    if free < required:
+        logging.info(
+            "[Raylight] decode keeps the VRAM reserve: %.1f GiB free, %.1f GiB needed to hold the VAE",
+            free / 1073741824, required / 1073741824)
+        yield
+        return
+
+    try:
+        aimdo_control.set_simple_vram_headroom(_DECODE_VRAM_RESERVE)
+        yield
+    finally:
+        #Restoring matters more than dropping it did: a worker left without its
+        #reserve samples without one next time, which is what it was there for.
+        try:
+            aimdo_control.set_simple_vram_headroom(previous)
+        except Exception as exc:
+            logging.error("[Raylight] could not restore the VRAM reserve after decode: %s", exc)
+
+
 def ray_vae_decode_temporal_partial_impl(worker, samples, job_rank=0, job_world_size=1):
     import comfy.model_management as model_management
 
@@ -177,30 +236,31 @@ def ray_vae_decode_temporal_partial_impl(worker, samples, job_rank=0, job_world_
         raise ValueError(f"Distributed VAE (Ray) temporal decode expects a 5D latent, got {latent.ndim}D.")
 
     memory_used = vae.memory_used_decode(latent.shape, vae.vae_dtype)
-    model_management.load_models_gpu([vae.patcher], memory_required=memory_used, force_full_load=vae.disable_offload)
+    with _decode_vram_reserve(vae, memory_used):
+        model_management.load_models_gpu([vae.patcher], memory_required=memory_used, force_full_load=vae.disable_offload)
 
-    output_shape = tuple(model.decode_output_shape(latent.shape))
+        output_shape = tuple(model.decode_output_shape(latent.shape))
 
-    chunks = []
-    with model_management.cuda_device_context(vae.device), torch.no_grad():
-        z = _normalize_latents(model, latent.to(vae.device, dtype=vae.vae_dtype))
-        pad_tokens, num_chunks = model._decode_temporal_chunks(z.shape[2])
-        if pad_tokens > 0:
-            pad_z = z[:, :, -1:, :, :].repeat(1, 1, pad_tokens, 1, 1)
-            z = torch.cat([z, pad_z], dim=2)
+        chunks = []
+        with model_management.cuda_device_context(vae.device), torch.no_grad():
+            z = _normalize_latents(model, latent.to(vae.device, dtype=vae.vae_dtype))
+            pad_tokens, num_chunks = model._decode_temporal_chunks(z.shape[2])
+            if pad_tokens > 0:
+                pad_z = z[:, :, -1:, :, :].repeat(1, 1, pad_tokens, 1, 1)
+                z = torch.cat([z, pad_z], dim=2)
 
-        for chunk_index in range(num_chunks):
-            if chunk_index % job_world_size != job_rank:
-                continue
-            #One stat per chunk, against a chunk that takes far longer to decode.
-            #Without it a cancel is not noticed until the whole decode is over,
-            #which for a long clip is most of what there was to cancel.
-            if progress.cancel_requested():
-                raise comfy_model_management.InterruptProcessingException()
-            t_start_idx = chunk_index * model.tokens_chunk_size
-            t_end_idx = t_start_idx + model.tokens_chunk_size + model.token_overlap
-            clip_dec = model._adaptive_decode(z[:, :, t_start_idx:t_end_idx, :, :])
-            chunks.append((chunk_index, clip_dec.to(device="cpu", copy=True)))
+            for chunk_index in range(num_chunks):
+                if chunk_index % job_world_size != job_rank:
+                    continue
+                #One stat per chunk, against a chunk that takes far longer to decode.
+                #Without it a cancel is not noticed until the whole decode is over,
+                #which for a long clip is most of what there was to cancel.
+                if progress.cancel_requested():
+                    raise comfy_model_management.InterruptProcessingException()
+                t_start_idx = chunk_index * model.tokens_chunk_size
+                t_end_idx = t_start_idx + model.tokens_chunk_size + model.token_overlap
+                clip_dec = model._adaptive_decode(z[:, :, t_start_idx:t_end_idx, :, :])
+                chunks.append((chunk_index, clip_dec.to(device="cpu", copy=True)))
 
     return {
         "mode": "temporal",
