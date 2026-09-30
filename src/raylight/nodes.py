@@ -9,6 +9,8 @@ from pathlib import Path
 from copy import deepcopy
 
 import ray
+
+from raylight.decode_pacer import DecodePacer
 import torch
 import comfy
 import folder_paths
@@ -1751,6 +1753,24 @@ class RayVAEDecodeDistributed:
                         "tooltip": "Retained for workflow compatibility. Distributed video decoding always keeps the complete temporal sequence on one worker; this value is not used for tiling.",
                     },
                 ),
+                "decode_stagger_ms": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 60000,
+                        "tooltip": "Hold each rank until the card ahead of it has been at full load this long, so the ranks do not all begin a chunk at the same moment. 0 leaves them to start together, which is the default.",
+                    },
+                ),
+                "decode_max_in_phase": (
+                    "INT",
+                    {
+                        "default": 2,
+                        "min": 1,
+                        "max": 16,
+                        "tooltip": "After the first chunk, how many ranks may be starting together before the rest are held back. Ignored when decode_stagger_ms is 0.",
+                    },
+                ),
             }
         }
 
@@ -1761,7 +1781,7 @@ class RayVAEDecodeDistributed:
 
     # -- Komikndr
     # By default VAE on comfy already "Parallelized" through tiling, so just distributed the tiling to other rank
-    def ray_decode(self, ray_actors, vae_name, samples, tile_size, overlap=64, temporal_size=64, temporal_overlap=8):
+    def ray_decode(self, ray_actors, vae_name, samples, tile_size, overlap=64, temporal_size=64, temporal_overlap=8, decode_stagger_ms=0, decode_max_in_phase=2):
         gpu_actors = ray_actors["workers"]
         if not gpu_actors:
             raise ValueError("Distributed VAE (Ray) requires at least one Ray worker.")
@@ -1772,12 +1792,20 @@ class RayVAEDecodeDistributed:
 
         # VAEs that decode in temporal chunks are split along time instead of tiled,
         # which needs no feathering and keeps each rank's peak independent of clip length
+        #One pacer for the whole decode, so the spacing is measured across the
+        #ranks rather than within each. It holds nothing worth keeping afterwards.
+        pacer = None
+        if decode_stagger_ms > 0:
+            pacer = DecodePacer.remote(decode_stagger_ms / 1000.0,
+                                       max_together=decode_max_in_phase)
+
         if ray.get(gpu_actors[0].ray_vae_supports_temporal_chunks.remote()):
             futures = [
                 actor.ray_vae_decode_temporal_partial.remote(
                     samples,
                     job_rank=i,
                     job_world_size=len(gpu_actors),
+                    pacer=pacer,
                 )
                 for i, actor in enumerate(gpu_actors)
             ]

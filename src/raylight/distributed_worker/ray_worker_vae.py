@@ -1,6 +1,8 @@
 import contextlib
 import logging
+import time
 
+import ray
 import torch
 
 
@@ -213,7 +215,8 @@ def _decode_vram_reserve(vae, memory_used):
             logging.error("[Raylight] could not restore the VRAM reserve after decode: %s", exc)
 
 
-def ray_vae_decode_temporal_partial_impl(worker, samples, job_rank=0, job_world_size=1):
+def ray_vae_decode_temporal_partial_impl(worker, samples, job_rank=0, job_world_size=1,
+                                         pacer=None):
     import comfy.model_management as model_management
 
     _validate_job_rank(job_rank, job_world_size)
@@ -233,6 +236,23 @@ def ray_vae_decode_temporal_partial_impl(worker, samples, job_rank=0, job_world_
         raise ValueError(f"Distributed VAE (Ray) temporal decode expects a 5D latent, got {latent.ndim}D.")
 
     memory_used = vae.memory_used_decode(latent.shape, vae.vae_dtype)
+    #Ranks are not pinned to cards, so the gate is told which device this rank
+    #actually holds rather than inferring it from the rank number.
+    device_index = getattr(vae.device, "index", None)
+    if device_index is None:
+        device_index = torch.cuda.current_device()
+
+    def wait_for_slot(round_index):
+        if pacer is None:
+            return
+        waited = 0.0
+        while True:
+            delay = ray.get(pacer.acquire.remote(job_rank, device_index, round_index, waited))
+            if delay <= 0:
+                break
+            time.sleep(delay)
+            waited += delay
+
     with _decode_vram_reserve(vae, memory_used):
         model_management.load_models_gpu([vae.patcher], memory_required=memory_used, force_full_load=vae.disable_offload)
 
@@ -251,6 +271,12 @@ def ray_vae_decode_temporal_partial_impl(worker, samples, job_rank=0, job_world_
                     continue
                 t_start_idx = chunk_index * model.tokens_chunk_size
                 t_end_idx = t_start_idx + model.tokens_chunk_size + model.token_overlap
+                #Immediately before the work rather than before the loop: the latent
+                #transfer and the chunk planning sit in between and take long enough to
+                #swallow whatever separation was asked for. The round is which time round
+                #the ranks this chunk is, so a rank's first chunk is the one gated against
+                #the shared read that would otherwise release them all together.
+                wait_for_slot(chunk_index // job_world_size)
                 clip_dec = model._adaptive_decode(z[:, :, t_start_idx:t_end_idx, :, :])
                 chunks.append((chunk_index, clip_dec.to(device="cpu", copy=True)))
 

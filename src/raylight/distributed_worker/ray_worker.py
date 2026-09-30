@@ -1091,8 +1091,9 @@ class RayWorker:
         return temporal_chunk_model(self.vae_model) is not None
 
     @patch_ray_tqdm
-    def ray_vae_decode_temporal_partial(self, samples, job_rank=0, job_world_size=1):
-        return ray_vae_decode_temporal_partial_impl(self, samples, job_rank, job_world_size)
+    def ray_vae_decode_temporal_partial(self, samples, job_rank=0, job_world_size=1, pacer=None):
+        return ray_vae_decode_temporal_partial_impl(self, samples, job_rank, job_world_size,
+                                                    pacer=pacer)
 
     def ray_vae_decode_temporal_combine(self, *worker_partials):
         return ray_vae_decode_temporal_combine_impl(self, worker_partials)
