@@ -1,3 +1,4 @@
+from .comfy_kitchen_int8 import ComfyKitchenInt8Attention, int8_attention_is_available
 from .dispatcher import InnerAttentionDispatcher
 from .h3_sla import H3_SLA_PREPARED_KEY, MiniMaxH3SLA
 from .registry import (
@@ -12,9 +13,9 @@ from .registry import (
 )
 
 __all__ = [
-    "H3_SLA_PREPARED_KEY", "INNER_ATTENTION_KEY", "InnerAttentionDispatcher", "InnerAttentionRegistry", "MiniMaxH3SLA",
+    "ComfyKitchenInt8Attention", "H3_SLA_PREPARED_KEY", "INNER_ATTENTION_KEY", "InnerAttentionDispatcher", "InnerAttentionRegistry", "MiniMaxH3SLA",
     "active_inner_attention", "clear_inner_attention", "create_inner_attention", "inner_attention_scope", "register_inner_attention",
-    "set_inner_attention",
+    "int8_attention_is_available", "set_inner_attention",
 ]
 
 
