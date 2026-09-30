@@ -65,12 +65,12 @@ branch fix/decode-cancel                      onto feat/vae-temporal-chunk-decod
 # The reserve fix edits ray_vae_decode_temporal_partial_impl, which the temporal
 # decode adds, so it chains onto it for the same reason the cancel does.
 branch fix/vae-decode-vram-reserve            onto feat/vae-temporal-chunk-decode
-# The pacer wires into that decode after the reserve fix has reshaped it. It is
-# off unless a workflow asks (decode_stagger_ms defaults to 0) and is expected to
-# come out once the reserve fix has been exercised at length: it manages WHEN each
-# card enters the host-heavy phase, and the reserve fix removes the phase.
-branch feat/decode-pacer                      onto fix/vae-decode-vram-reserve
-branch feat/vae-decode-controls               onto feat/vae-temporal-chunk-decode
+# feat/decode-pacer and feat/vae-decode-controls are out of the build, like
+# tooling/fsdp-probes and tooling/crash-trace. They exist to investigate the
+# host-heavy decode phase - the pacer spaces out when each card enters it, the
+# controls narrow the fan-out and pin the VAE resident to bisect it. The reserve
+# fix removes the phase, so both describe a problem the build no longer has, and
+# their node inputs would be four widgets a workflow has no reason to set.
 
 # -- features, all off by default --------------------------------------------
 # fix/mlp-chunk owns the _mlp_branch extraction so the single pass and the per
@@ -124,4 +124,4 @@ branch tooling/stack                          onto base
 # the saved workflows in ComfyUI/user/default/workflows were built against.
 # verify-restack.sh checks that order explicitly - do not reorder these two
 # without re-running it.
-assemble tooling/stack fix/xfuser-version-bound fix/dead-actor-recovery fix/ring-attention-lse-padding fix/worker-nvrtc-library-path fix/parallel-quant-shard-load fix/forward-fast-disk-to-workers fix/sampler-progress fix/worker-vram-release-on-failure fix/sampler-cancel fix/offload-quantized-fsdp-shards fix/free-host-vram-before-shard-load fix/keep-host-models-when-gpus-pinned feat/vae-temporal-chunk-decode fix/decode-cancel fix/vae-decode-vram-reserve feat/decode-pacer fix/mlp-chunk feat/minimax-h3-fp16 feat/minimax-h3-fp16-node-inputs feat/numa-aware-worker-placement feat/lora-bypass-operand-placement feat/rank-gpu-pinning fix/ray-kill-without-model-load fix/worker-pinned-memory-selectable feat/worker-vram-tunables-in-workflow feat/initializer-input-ux fix/ck-patch-scope-nesting feat/fsdp-text-encoder fix/quant-loader-requires-grad feat/vae-decode-controls
+assemble tooling/stack fix/xfuser-version-bound fix/dead-actor-recovery fix/ring-attention-lse-padding fix/worker-nvrtc-library-path fix/parallel-quant-shard-load fix/forward-fast-disk-to-workers fix/sampler-progress fix/worker-vram-release-on-failure fix/sampler-cancel fix/offload-quantized-fsdp-shards fix/free-host-vram-before-shard-load fix/keep-host-models-when-gpus-pinned feat/vae-temporal-chunk-decode fix/decode-cancel fix/vae-decode-vram-reserve fix/mlp-chunk feat/minimax-h3-fp16 feat/minimax-h3-fp16-node-inputs feat/numa-aware-worker-placement feat/lora-bypass-operand-placement feat/rank-gpu-pinning fix/ray-kill-without-model-load fix/worker-pinned-memory-selectable feat/worker-vram-tunables-in-workflow feat/initializer-input-ux fix/ck-patch-scope-nesting feat/fsdp-text-encoder fix/quant-loader-requires-grad
