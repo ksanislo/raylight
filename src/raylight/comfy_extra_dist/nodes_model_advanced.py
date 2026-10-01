@@ -529,8 +529,9 @@ class RayModelAttentionBackend:
                 "ray_actors": ("RAY_ACTORS",),
                 "attention": (backends, {
                     "default": "pytorch attention",
-                    "tooltip": "Attention used inside Ulysses. Comfy Kitchen attention is INT8 and returns no "
-                               "log-sum-exp, so it needs ring_degree 1.",
+                    "tooltip": "Attention used inside Ulysses. Comfy Kitchen attention is INT8; with "
+                               "ring_degree above 1 it needs a Comfy Kitchen build that has "
+                               "int8_attention_with_lse.",
                 }),
                 "dense_first_steps": ("INT", {
                     "default": 0, "min": 0, "max": 10000,
