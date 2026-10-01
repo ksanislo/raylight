@@ -39,11 +39,18 @@ def _step_index(transformer_options):
     return index, len(schedule)
 
 
-# Comfy Kitchen's INT8 attention returns no log-sum-exp, so the partial results of
-# a ring step cannot be merged; it only replaces the local attention of Ulysses.
+def _ring_size(group):
+    if group is None or not torch.distributed.is_available() or not torch.distributed.is_initialized():
+        return 1
+    return torch.distributed.get_world_size(group)
+
+
+# Ring steps are merged by their log-sum-exp, which only Comfy Kitchen builds with
+# int8_attention_with_lse return; without it the processor replaces the local
+# attention of Ulysses alone.
 @register_inner_attention("raylight:comfy_kitchen_int8")
 class ComfyKitchenInt8Attention:
-    supports_ring = False
+    supports_ring = comfy_kitchen is not None and hasattr(comfy_kitchen, "int8_attention_with_lse")
 
     def __init__(self, dense_first_steps=0):
         self.dense_first_steps = int(dense_first_steps)
@@ -76,6 +83,8 @@ class ComfyKitchenInt8Attention:
             self._logged_step = step
         if dense_step:
             return dense_attention(q, k, v, **kwargs)
+        if _ring_size(kwargs.get("group")) > 1:
+            return self._ring(dense_attention, q, k, v, kwargs)
         try:
             # xFuser hands [batch, seq, heads, dim]; the kernel takes [batch, heads, seq, dim].
             out = comfy_kitchen.int8_attention(
@@ -93,3 +102,35 @@ class ComfyKitchenInt8Attention:
                 tuple(q.shape), q.dtype), flush=True)
             self._logged_success = True
         return out
+
+    def _ring(self, dense_attention, q, k, v, kwargs):
+        # xFuser's ring loop runs one attention per key shard and merges the
+        # results by log-sum-exp. An unrecognised attn_type makes it use
+        # attn_processor for that per-shard attention.
+        from yunchang.kernels import select_flash_attn_impl
+        fallback = select_flash_attn_impl(kwargs.get("attn_type"), stage="fwd-only",
+                                          attn_processor=kwargs.get("attn_processor"))
+
+        def step(query, key, value, **step_kwargs):
+            try:
+                out, lse = comfy_kitchen.int8_attention_with_lse(
+                    query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2),
+                    scale=step_kwargs.get("softmax_scale"),
+                )
+            except Exception as error:
+                if not self._logged_failure:
+                    logging.warning("[Raylight] Comfy Kitchen INT8 ring step failed; using dense attention (%s)",
+                                    error)
+                    self._logged_failure = True
+                return fallback(query, key, value, **step_kwargs)
+            if not self._logged_success:
+                print("[Raylight] Using custom attention: Comfy Kitchen INT8 ring q={} {}".format(
+                    tuple(query.shape), query.dtype), flush=True)
+                self._logged_success = True
+            return out.transpose(1, 2), lse
+
+        options = dict(kwargs)
+        options["attn_type"] = None
+        options["attn_processor"] = step
+        return dense_attention(q, k, v, **options)
+
