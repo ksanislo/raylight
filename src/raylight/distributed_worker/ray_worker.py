@@ -649,7 +649,7 @@ class RayWorker:
             "nccl",
             rank=nccl_rank,
             world_size=nccl_world_size,
-            timeout=timedelta(minutes=1),
+            timeout=_collective_timeout(),
             init_method=f"tcp://{master_addr}:{group_port}",
         )
 
@@ -1850,6 +1850,15 @@ class RayWorker:
         return (out,)
 
 
+def _collective_timeout():
+    """How long a rank waits in a collective before NCCL's watchdog ends it.
+
+    Short on purpose: a rank that has stalled or died strands the others inside
+    the collective, and this is what turns that into a failure instead of a hang.
+    """
+    return timedelta(minutes=float(os.environ.get("RAYLIGHT_PG_TIMEOUT_MINUTES") or 1))
+
+
 class RayCOMMTester:
     def __init__(self, local_rank, world_size, device_id):
         device = torch.device(f"cuda:{device_id}")
@@ -1859,7 +1868,7 @@ class RayCOMMTester:
             "nccl",
             rank=local_rank,
             world_size=world_size,
-            timeout=timedelta(minutes=1),
+            timeout=_collective_timeout(),
             # device_id=self.device
         )
         print("Running COMM pre-run")

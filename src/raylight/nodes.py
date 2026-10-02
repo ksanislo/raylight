@@ -232,6 +232,7 @@ _WORKER_ENV_KNOBS = (
     "RAYLIGHT_FP32_RESIDUAL",
     "RAYLIGHT_MLP_CHUNK_TOKENS",
     "RAYLIGHT_LORA_BYPASS",
+    "RAYLIGHT_PG_TIMEOUT_MINUTES",
 )
 
 
@@ -2339,6 +2340,16 @@ class RayWorkerOptions:
                      "tooltip": "Where the LoRA bypass keeps its operands. `resident` holds them on the card, `pinned` in pinned host memory. `auto` keeps the server setting (RAYLIGHT_LORA_BYPASS).",
                      },
                 ),
+                "collective_timeout_minutes": (
+                    "FLOAT",
+                    {"display_name": "Collective timeout, minutes (-1 = server default)",
+                     "default": -1.0,
+                     "min": -1.0,
+                     "max": 60.0,
+                     "step": 0.5,
+                     "tooltip": "How long a worker waits in a collective for its peers before NCCL's watchdog ends it. Short finds a stalled or dead rank quickly; raise it only if a healthy block takes longer than this on one rank. -1 keeps the server setting (RAYLIGHT_PG_TIMEOUT_MINUTES, 1 minute if unset).",
+                     },
+                ),
             }
         }
 
@@ -2347,7 +2358,8 @@ class RayWorkerOptions:
     FUNCTION = "build"
     CATEGORY = "Raylight"
 
-    def build(self, numa_bind, attention_fp16, mlp_fp16, fp32_residual, mlp_chunk_tokens, lora_bypass):
+    def build(self, numa_bind, attention_fp16, mlp_fp16, fp32_residual, mlp_chunk_tokens, lora_bypass,
+              collective_timeout_minutes=-1.0):
         def flag(value):
             # auto leaves the host environment untouched
             return None if value == "auto" else ("1" if value == "on" else "0")
@@ -2363,6 +2375,8 @@ class RayWorkerOptions:
         if lora_bypass != "auto":
             # `default` means the plain path, which the worker reads as an unset value
             options["RAYLIGHT_LORA_BYPASS"] = "" if lora_bypass == "default" else lora_bypass
+        if collective_timeout_minutes > 0:
+            options["RAYLIGHT_PG_TIMEOUT_MINUTES"] = str(collective_timeout_minutes)
         return ({k: v for k, v in options.items() if v is not None},)
 
 NODE_CLASS_MAPPINGS = {
