@@ -103,6 +103,26 @@ branch fix/ray-kill-without-model-load        onto base
 branch fix/worker-pinned-memory-selectable    onto base
 branch feat/worker-vram-tunables-in-workflow  onto base
 branch feat/initializer-input-ux              onto feat/worker-vram-tunables-in-workflow
+# Comfy Kitchen INT8 attention as a Raylight inner-attention processor, ring
+# support included. Was in the assemble order without a declaration, which
+# restack.sh refuses.
+branch feat/ck-int8-attention                 onto base
+
+# -- long clips: per-rank memory and failing cleanly --------------------------
+# Each rank builds only its slice of the MiniMax H3 sequence and gathers only the
+# head's outputs. Touches xdit_context_parallel.py, which the fp16, control-patch
+# and ck branches also reshape, so it assembles after all of them.
+branch fix/minimax-local-embed-and-head       onto base
+# Both need offload_clip_vram / encode_tokens, which only feat/fsdp-text-encoder has.
+branch fix/offload-encoder-while-sampling     onto feat/fsdp-text-encoder
+branch fix/prepare-encoder-on-every-rank      onto feat/fsdp-text-encoder
+# Holds operands through _bypass_operands, which the placement branch adds.
+branch fix/lora-bypass-in-place               onto feat/lora-bypass-operand-placement
+# Both build on the cancel path: its drain timing, retire_actors, actor_generation.
+branch fix/fail-job-on-dead-worker            onto fix/sampler-cancel
+branch fix/reinit-after-workers-die           onto fix/sampler-cancel
+# Another RayWorkerOptions knob. Its input is appended last, so it assembles last.
+branch feat/collective-timeout-option         onto base
 
 # tooling/crash-trace is NOT declared as a PR branch and is NOT in the build. Its
 # markers sit in code owned by two different feature branches (encode_tokens from
@@ -133,4 +153,4 @@ branch tooling/stack                          onto base
 # the saved workflows in ComfyUI/user/default/workflows were built against.
 # verify-restack.sh checks that order explicitly - do not reorder these two
 # without re-running it.
-assemble tooling/stack fix/xfuser-version-bound fix/dead-actor-recovery fix/ring-attention-lse-padding fix/worker-nvrtc-library-path fix/parallel-quant-shard-load fix/forward-fast-disk-to-workers fix/sampler-progress fix/worker-vram-release-on-failure fix/sampler-cancel fix/offload-quantized-fsdp-shards fix/free-host-vram-before-shard-load fix/keep-host-models-when-gpus-pinned feat/vae-temporal-chunk-decode fix/decode-cancel fix/vae-decode-vram-reserve fix/mlp-chunk feat/minimax-h3-fp16 feat/minimax-h3-fp16-node-inputs feat/numa-aware-worker-placement feat/lora-bypass-operand-placement feat/rank-gpu-pinning fix/ray-kill-without-model-load fix/worker-pinned-memory-selectable feat/worker-vram-tunables-in-workflow feat/initializer-input-ux fix/ck-patch-scope-nesting feat/fsdp-text-encoder fix/quant-loader-requires-grad feat/minimax-h3-fun-controlnet fix/control-patch-full-sequence feat/ck-int8-attention
+assemble tooling/stack fix/xfuser-version-bound fix/dead-actor-recovery fix/ring-attention-lse-padding fix/worker-nvrtc-library-path fix/parallel-quant-shard-load fix/forward-fast-disk-to-workers fix/sampler-progress fix/worker-vram-release-on-failure fix/sampler-cancel fix/offload-quantized-fsdp-shards fix/free-host-vram-before-shard-load fix/keep-host-models-when-gpus-pinned feat/vae-temporal-chunk-decode fix/decode-cancel fix/vae-decode-vram-reserve fix/mlp-chunk feat/minimax-h3-fp16 feat/minimax-h3-fp16-node-inputs feat/numa-aware-worker-placement feat/lora-bypass-operand-placement feat/rank-gpu-pinning fix/ray-kill-without-model-load fix/worker-pinned-memory-selectable feat/worker-vram-tunables-in-workflow feat/initializer-input-ux fix/ck-patch-scope-nesting feat/fsdp-text-encoder fix/quant-loader-requires-grad feat/minimax-h3-fun-controlnet fix/control-patch-full-sequence feat/ck-int8-attention fix/minimax-local-embed-and-head fix/offload-encoder-while-sampling fix/prepare-encoder-on-every-rank fix/lora-bypass-in-place fix/fail-job-on-dead-worker fix/reinit-after-workers-die feat/collective-timeout-option
