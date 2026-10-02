@@ -92,6 +92,9 @@ class ComfyKitchenInt8Attention:
                 scale=kwargs.get("softmax_scale", None),
             )
             out = out.transpose(1, 2).contiguous()
+        except torch.cuda.OutOfMemoryError:
+            # dense attention needs more memory than the kernel, not less
+            raise
         except Exception as error:
             if not self._logged_failure:
                 logging.warning("[Raylight] Comfy Kitchen INT8 attention failed; using dense attention (%s)", error)
@@ -117,6 +120,8 @@ class ComfyKitchenInt8Attention:
                     query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2),
                     scale=step_kwargs.get("softmax_scale"),
                 )
+            except torch.cuda.OutOfMemoryError:
+                raise
             except Exception as error:
                 if not self._logged_failure:
                     logging.warning("[Raylight] Comfy Kitchen INT8 ring step failed; using dense attention (%s)",
