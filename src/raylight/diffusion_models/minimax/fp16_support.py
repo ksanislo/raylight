@@ -19,6 +19,37 @@ def _minimax_config():
     return getattr(comfy.supported_models, "MiniMaxH3", None)
 
 
+_HANDLED_BY_COMFYUI = None
+
+
+def comfyui_handles_fp16():
+    """Whether ComfyUI runs MiniMax H3 in fp16 on its own.
+
+    It does when its config offers fp16 and its DiT block takes the branch dtype
+    from transformer_options, carrying the residual in fp32 itself. Then its block
+    and its extra_conds are used, and this module's versions are not. Looked up
+    once, before allow_fp16_inference can add fp16 to the config itself.
+    """
+    global _HANDLED_BY_COMFYUI
+    if _HANDLED_BY_COMFYUI is None:
+        config = _minimax_config()
+        _HANDLED_BY_COMFYUI = bool(config is not None
+                                   and torch.float16 in config.supported_inference_dtypes
+                                   and _block_takes_branch_dtype())
+    return _HANDLED_BY_COMFYUI
+
+
+def _block_takes_branch_dtype():
+    import inspect
+
+    try:
+        from comfy.ldm.minimax.model import DiTBlock
+
+        return "minimax_branch_dtype" in inspect.getsource(DiTBlock.forward)
+    except (ImportError, AttributeError, OSError, TypeError):
+        return False
+
+
 def fp16_forwards_active(parallel_dict):
     """Whether this worker installs the fp16-safe MiniMax H3 forwards.
 
@@ -40,7 +71,7 @@ def allow_fp16_inference(parallel_dict):
     unaffected. Only this worker process sees the change.
     """
     config = _minimax_config()
-    if config is None or not fp16_forwards_active(parallel_dict):
+    if config is None or comfyui_handles_fp16() or not fp16_forwards_active(parallel_dict):
         return False
     dtypes = list(config.supported_inference_dtypes)
     if torch.float16 in dtypes:
