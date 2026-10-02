@@ -1685,6 +1685,7 @@ def make_ray_actor_fn(world_size, parallel_dict):
 
         for actor in ray_actors["workers"]:
             ray.get(actor.__ray_ready__.remote())
+        _note_workers_spawned()
         return ray_actors
 
     return _init_ray_actor
@@ -1703,6 +1704,55 @@ def actor_generation():
     own cache rules.
     """
     return _ACTOR_GENERATION
+
+
+_WORKER_EPOCH = 0
+_WORKERS_SEEN_ALIVE = False
+
+
+def _workers_alive():
+    if not ray.is_initialized():
+        return False
+    names = [n for n in ray.util.list_named_actors() if str(n).startswith("RayWorker:")]
+    if not names:
+        return False
+    try:
+        ray.get([ray.get_actor(n).get_is_model_loaded.remote() for n in names], timeout=10)
+    except Exception:
+        return False
+    return True
+
+
+def _note_workers_spawned():
+    """Count workers that just came up as seen alive.
+
+    worker_epoch only bumps for workers it has seen alive, and it looks only when
+    comfy asks the initializer IS_CHANGED. Workers spawned and lost between two of
+    those checks - a render that dies on its first run - would otherwise never be
+    noticed, and the next run would be handed their dead handles.
+    """
+    global _WORKERS_SEEN_ALIVE
+    _WORKERS_SEEN_ALIVE = True
+
+
+def worker_epoch():
+    """Bumped once each time workers that were alive are found dead.
+
+    Workers can die outside retire_actors - killed by hand, reaped by the reset
+    workflow's ray.shutdown(), or crashed - and then nothing bumps
+    actor_generation. The initializer reports this from IS_CHANGED so everything
+    below it re-runs on fresh workers instead of meeting dead handles. It stays
+    put once new workers are up, so the next run cache-hits as usual. Never
+    starts a cluster: with ray down there is nothing to ping.
+    """
+    global _WORKER_EPOCH, _WORKERS_SEEN_ALIVE
+    if _workers_alive():
+        _WORKERS_SEEN_ALIVE = True
+    elif _WORKERS_SEEN_ALIVE:
+        _WORKERS_SEEN_ALIVE = False
+        _WORKER_EPOCH += 1
+        logging.warning("[Raylight] workers are gone; the initializer will run again")
+    return _WORKER_EPOCH
 
 
 def retire_actors(ray_actors, reason):
