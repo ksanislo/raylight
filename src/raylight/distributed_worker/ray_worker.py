@@ -1196,6 +1196,10 @@ class RayWorker:
         return {k: (v.to("cpu") if torch.is_tensor(v) else v) for k, v in out.items()}
 
     def load_unet(self, unet_path, model_options):
+        from raylight.diffusion_models.minimax.fp16_support import allow_fp16_inference
+
+        #Before the config is read, so every load path below sees it.
+        allow_fp16_inference(self.parallel_dict)
         if self.parallel_dict["is_fsdp"] is True:
             active_key = self._active_model_key(unet_path, model_options)
 
