@@ -1080,6 +1080,28 @@ class RayWorker:
 
     @patch_temp_fix_ck_ops
     @patch_enable_comfy_kitchen_fsdp
+    def prepare_clip(self, tokens):
+        """Load and shard the encoder onto this rank's card, with no collectives.
+
+        The weights are mmapped, so this is where they are actually read, and a
+        cold read can take minutes and differ by minutes between ranks. Inside
+        encode_tokens that skew landed in front of the first all-gather: ranks
+        that arrived early hit the process group's one-minute timeout and left,
+        and the late ones then waited forever for them. Run on every rank and
+        waited for by the caller before encode_tokens, so the ranks enter the
+        collectives together however long the read took.
+        """
+        if self.clip is None:
+            raise RuntimeError("prepare_clip called before load_clip")
+        if self.clip_state_dict is not None:
+            self.set_clip_state_dict()
+        self.restore_clip_vram()
+        #Same tokens as the encode, so the memory estimate matches and the load
+        #inside encode_from_tokens finds the model already in place.
+        self.clip.load_model(tokens)
+
+    @patch_temp_fix_ck_ops
+    @patch_enable_comfy_kitchen_fsdp
     @report_encode_progress
     def encode_tokens(self, tokens):
         """Run the sharded encoder over already-tokenized input.
@@ -1104,8 +1126,8 @@ class RayWorker:
         #of the sharding - has no hook and would be read with an empty storage.
         self.restore_clip_vram()
 
-        #clip.patcher is the FSDP patcher, so encode_from_tokens loads and shards
-        #on its own; loading here first would only do it twice.
+        #prepare_clip has normally loaded and sharded already; encode_from_tokens
+        #still does it itself when called without it.
         out = self.clip.encode_from_tokens(tokens, return_pooled=True, return_dict=True)
         #Only rank 0's copy is returned; every rank computes the same thing.
         if self.local_rank != 0:
