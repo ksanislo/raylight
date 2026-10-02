@@ -124,6 +124,15 @@ branch fix/reinit-after-workers-die           onto fix/sampler-cancel
 # Another RayWorkerOptions knob. Its input is appended last, so it assembles last.
 branch feat/collective-timeout-option         onto base
 
+# -- fp16 MiniMax H3 without our ComfyUI fork ---------------------------------
+# NOT in the build yet: each needs a render before it goes in. The first makes
+# fp16 work on stock ComfyUI (load dtype + fp32 text preprocessing, both
+# Raylight-side). The second defers to ComfyUI's native fp16 block, MLP and
+# conditioning where they exist, which changes the path production takes on our
+# fork - validate it on production ComfyUI, and the first on a stock checkout.
+branch feat/minimax-h3-fp16-stock-comfy       onto feat/minimax-h3-fp16
+branch feat/minimax-h3-fp16-native            onto feat/minimax-h3-fp16-stock-comfy
+
 # tooling/crash-trace is NOT declared as a PR branch and is NOT in the build. Its
 # markers sit in code owned by two different feature branches (encode_tokens from
 # feat/fsdp-text-encoder, the decode path from feat/vae-temporal-chunk-decode), so it
