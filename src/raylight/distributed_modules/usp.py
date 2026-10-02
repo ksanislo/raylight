@@ -418,6 +418,9 @@ if hasattr(model_base, "MiniMaxH3"):
         sidecar_groups = model_patcher.get_attachment(FSDP_LORA_SIDECAR_ATTACHMENT) or {}
         mlp_fp16 = _os.environ.get("RAYLIGHT_MLP_FP16") == "1"
         block_fp32_residual = _os.environ.get("RAYLIGHT_FP32_RESIDUAL") == "1"
+        if mlp_fp16 and block_fp32_residual:
+            from ..diffusion_models.minimax.fp16_support import preprocess_text_in_fp32
+            preprocess_text_in_fp32(base_model)
         for i, block in enumerate(model.blocks):
             block.attn.forward = types.MethodType(usp_attn_forward, block.attn)
             if block_fp32_residual:
