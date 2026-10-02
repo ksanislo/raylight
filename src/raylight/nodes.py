@@ -22,6 +22,7 @@ from comfy import sd, sample, utils  # type: ignore
 from .distributed_worker.ray_worker import (
     make_ray_actor_fn,
     actor_generation,
+    worker_epoch,
     ensure_fresh_actors,
     ray_nccl_tester,
 )
@@ -503,6 +504,12 @@ class RayInitializer:
 
     FUNCTION = "spawn_actor"
     CATEGORY = "Raylight"
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        #Dead workers must re-run the initializer, not be served from cache: every
+        #loader and sampler below holds its handles.
+        return worker_epoch()
 
     def spawn_actor(
         self,
