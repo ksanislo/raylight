@@ -1892,6 +1892,9 @@ class RayCLIP:
         from raylight.comfy_extra_dist.nodes_custom_sampler import _gather_with_progress
 
         workers = self.ray_actors["workers"]
+        #Every rank loads first and all are waited for, so a slow cold read on one
+        #rank cannot leave the others timing out in the encode's first all-gather.
+        _gather_with_progress([actor.prepare_clip.remote(tokens) for actor in workers], self.ray_actors)
         futures = [actor.encode_tokens.remote(tokens) for actor in workers]
         #Same wait the samplers use: ray.get would sit at 0% for the whole encode
         #and swallow an interrupt, because the ProgressBar that reports and polls
