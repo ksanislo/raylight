@@ -174,18 +174,24 @@ def test_minimax_control_patch_uses_full_sequence_and_returns_local_shard():
     exec(compile(module, str(RAYLIGHT), "exec"), scope)
 
     control = SimpleNamespace(
-        before_block=lambda index, args: control_inputs.append((index, args["img"].clone(), args["layout"])),
+        before_block=lambda index, args: control_inputs.append((index, args["img"].clone(), args["layout"],
+                                                                args["rope_freqs"], args["mod_segments"])),
         after_block=lambda index, args, out: (control_outputs.append((index, out["img"].clone())) or {"img": out["img"] + 3}),
     )
     patch = SimpleNamespace(block_index=0, control_patch=control, previous=None)
     layout = object()
     local_input = torch.tensor([[6., 7.], [8., 9.], [0., 0.]])
-    args = {"img": local_input, "layout": layout}
-    result = scope["_run_control_patch"](patch, args, lambda data: {"img": data["img"] + 10}, 5)
+    # the rank's own slices, which the control stream must not see
+    args = {"img": local_input, "layout": layout, "rope_freqs": "local rope", "mod_segments": "local segments"}
+    full_rope_freqs, full_mod_segments = object(), object()
+    result = scope["_run_control_patch"](patch, args, lambda data: {"img": data["img"] + 10}, 5,
+                                         full_rope_freqs, full_mod_segments)
 
     assert group.calls == 2
     assert control_inputs[0][0] == control_outputs[0][0] == 0
     assert control_inputs[0][2] is layout
+    assert control_inputs[0][3] is full_rope_freqs
+    assert control_inputs[0][4] is full_mod_segments
     torch.testing.assert_close(control_inputs[0][1], full_input)
     torch.testing.assert_close(control_outputs[0][1], full_output)
     torch.testing.assert_close(result, torch.tensor([[19., 20.], [21., 22.], [0., 0.]]))
