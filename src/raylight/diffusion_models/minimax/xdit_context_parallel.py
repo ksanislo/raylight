@@ -10,6 +10,7 @@ from xfuser.core.distributed import get_sequence_parallel_rank, get_sequence_par
 
 import raylight.distributed_modules.attention as xfuser_attn
 from ..utils import pad_to_world_size
+from .fp16_support import comfyui_handles_fp16
 
 
 attn_type = xfuser_attn.get_attn_type()
@@ -277,7 +278,8 @@ def usp_dit_forward(self, x, timestep, context, transformer_options={}, minimax_
     # zeros, not empty: the segment loop below does not necessarily cover every
     # row (the sequence is padded to the world size), and an uninitialised row
     # is far more likely to hold a NaN bit pattern in fp16 than in fp32.
-    residual_dtype = torch.float32 if _fp32_residual() else dtype
+    native_fp16 = dtype == torch.float16 and comfyui_handles_fp16()
+    residual_dtype = torch.float32 if _fp32_residual() or native_fp16 else dtype
     h = torch.zeros(layout.seq_len, self.hidden_size, dtype=residual_dtype, device=device)
     voff = aoff = 0
     for a, b, kind in layout.segments:
@@ -309,6 +311,10 @@ def usp_dit_forward(self, x, timestep, context, transformer_options={}, minimax_
     h, rope_freqs, mod_segments = _split_packed_sequence(h, rope_freqs, mod_segments)
 
     # blocks
+    if native_fp16:
+        # ComfyUI's block narrows its branches to this and keeps the residual wide;
+        # its own _forward sets it, and this one replaces that
+        transformer_options["minimax_branch_dtype"] = dtype
     patches_replace = transformer_options.get("patches_replace", {})
     blocks_replace = patches_replace.get("dit", {})
     prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.blocks), device, transformer_options)
