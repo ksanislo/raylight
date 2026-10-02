@@ -113,7 +113,16 @@ def _clear_ray_worker_vram_after_sampling(ray_actors, force=False):
         if not parallel_dict.get("clear_vram_after_sampling", False):
             return
 
-    ray.get([actor.clear_sampling_vram.remote() for actor in gpu_actors])
+    refs = [actor.clear_sampling_vram.remote() for actor in gpu_actors]
+    if force:
+        #After a failure a worker may be dead, retired, or stuck on one that is:
+        #clear whoever answers, and leave the original error to be the one raised.
+        try:
+            ray.get(refs, timeout=CANCEL_DRAIN_DEFAULT_SECONDS)
+        except Exception as error:
+            logging.warning("[Raylight] could not clear every worker after a failure: %s", error)
+    else:
+        ray.get(refs)
     gc.collect()
     comfy.model_management.unload_all_models()
     comfy.model_management.soft_empty_cache()
@@ -510,6 +519,33 @@ def _drain_seconds(slowest_checkpoint):
                    CANCEL_DRAIN_MIN_SECONDS), CANCEL_DRAIN_MAX_SECONDS)
 
 
+def _first_failure(ready):
+    """Return the error of the first finished future that failed, if any."""
+    for ref in ready:
+        try:
+            ray.get(ref, timeout=0)
+        except Exception as error:
+            return error
+    return None
+
+
+def _fail_with_peers(failure, pending, ray_actors, slowest_checkpoint):
+    """Fail the job once a worker has failed, ending any peer it stranded.
+
+    The ranks share every collective, so the rest cannot finish without the one
+    that failed. Those that failed too - an OOM usually reaches every rank - have
+    unwound and stay usable. One still running a checkpoint later is waiting in a
+    collective on a peer that is gone, would hold its device forever, and can only
+    be ended.
+    """
+    if pending:
+        window = min(max(slowest_checkpoint, CANCEL_PEER_MIN_SECONDS), _drain_seconds(slowest_checkpoint))
+        _done, stuck = ray.wait(pending, num_returns=len(pending), timeout=window)
+        if stuck and ray_actors is not None:
+            retire_actors(ray_actors, "a worker failed and %d were left waiting on it" % len(stuck))
+    raise failure
+
+
 def _gather_with_progress(futures, ray_actors=None):
     """Wait on the sampling futures while relaying worker progress to the UI.
 
@@ -531,6 +567,9 @@ def _gather_with_progress(futures, ray_actors=None):
     try:
         while pending:
             _ready, pending = ray.wait(pending, num_returns=len(pending), timeout=0.5)
+            failure = _first_failure(_ready)
+            if failure is not None:
+                _fail_with_peers(failure, pending, ray_actors, max(checkpoints) if checkpoints else 0.0)
             #Checked every pass rather than only when the bar moves: a render that
             #has stopped publishing progress is exactly the one worth cancelling.
             comfy.model_management.throw_exception_if_processing_interrupted()
