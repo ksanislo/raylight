@@ -42,8 +42,45 @@ class OffsetBypassAdapter(comfy.weight_adapter.WeightAdapterBase):
             tuple(base_shape),
         )
 
+    #rows per slice when the LoRA sum is added into the base output
+    BYPASS_CHUNK_ROWS = 8192
+
+    def bypass_forward(self, org_forward, x, *args, **kwargs):
+        #The default bypass holds the base output, the LoRA sum and base + sum at
+        #once, each the size of the layer output - at long clip lengths the largest
+        #transient in a block. Add the sum into the base output in place instead,
+        #a slice of rows at a time.
+        base_out = org_forward(x, *args, **kwargs)
+        rows = base_out.numel() // base_out.shape[-1] if base_out.ndim else 0
+        if (getattr(self, "is_conv", False) or rows <= self.BYPASS_CHUNK_ROWS
+                or not base_out.is_contiguous() or not x.is_contiguous()
+                or x.numel() // x.shape[-1] != rows
+                or torch.promote_types(base_out.dtype, x.dtype) != base_out.dtype):
+            return self.g(base_out + self.h(x, base_out))
+
+        from raylight.comfy_dist.weight_adapter.lora import LoRAAdapter, _bypass_operands
+        held = []
+        for item in self.entries:
+            adapter = item["adapter"]
+            if isinstance(adapter, LoRAAdapter):
+                up, down = _bypass_operands(adapter, adapter.weights[0], adapter.weights[1], x.device, x.dtype)
+                adapter._bypass_held = ((x.device, x.dtype), up, down)
+                held.append(adapter)
+        try:
+            x_rows = x.view(-1, x.shape[-1])
+            out_rows = base_out.view(-1, base_out.shape[-1])
+            for start in range(0, rows, self.BYPASS_CHUNK_ROWS):
+                stop = start + self.BYPASS_CHUNK_ROWS
+                out_rows[start:stop] += self.h(x_rows[start:stop], out_rows[start:stop])
+        finally:
+            for adapter in held:
+                adapter._bypass_held = None
+        return self.g(base_out)
+
     def h(self, x: torch.Tensor, base_out: torch.Tensor) -> torch.Tensor:
-        total = torch.zeros_like(base_out)
+        # accumulated in place: each LoRA's delta is the size of the layer output,
+        # and out-of-place sums kept several of them alive at once
+        total = None
         out_dim = 1 if getattr(self, "is_conv", False) else base_out.ndim - 1
 
         for item in self.entries:
@@ -65,7 +102,7 @@ class OffsetBypassAdapter(comfy.weight_adapter.WeightAdapterBase):
 
             if offset is None:
                 if delta.shape == base_out.shape:
-                    total = total + delta
+                    total = delta if total is None else total.add_(delta)
                 else:
                     self._warn_shape(base_key, offset, delta.shape, base_out.shape)
                 continue
@@ -85,17 +122,18 @@ class OffsetBypassAdapter(comfy.weight_adapter.WeightAdapterBase):
 
             slicer = [slice(None)] * base_out.ndim
             slicer[out_dim] = slice(start, start + length)
+            if total is None:
+                total = torch.zeros_like(base_out)
             view = total[tuple(slicer)]
 
             if delta.shape == view.shape:
-                view = view + delta
-                total[tuple(slicer)] = view
+                view.add_(delta)
             elif delta.shape == base_out.shape:
-                total = total + delta
+                total.add_(delta)
             else:
                 self._warn_shape(base_key, offset, delta.shape, base_out.shape)
 
-        return total
+        return total if total is not None else torch.zeros_like(base_out)
 
 
 class DirectDiffBypassAdapter(comfy.weight_adapter.WeightAdapterBase):

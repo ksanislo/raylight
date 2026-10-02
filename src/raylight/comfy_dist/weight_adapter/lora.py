@@ -30,6 +30,11 @@ def _bypass_operands(adapter, up, down, device, dtype):
     pinned    keeps them on the host but page locked, so the copy is genuinely
               asynchronous and the host does not stall.
     """
+    #held for the length of one chunked bypass forward, so its slices share one cast
+    held = getattr(adapter, "_bypass_held", None)
+    if held is not None and held[0] == (device, dtype):
+        return held[1], held[2]
+
     if _BYPASS_RESIDENT:
         cache = getattr(adapter, "_bypass_cache", None)
         key = (device, dtype)
@@ -355,4 +360,5 @@ class LoRAAdapter(WeightAdapterBase):
             hidden = op(x, down, **kw_dict)
             out = op(hidden, up)
 
-        return out * scale
+        # out is a fresh tensor, scaled in place to skip an output-sized copy
+        return out.mul_(scale)
