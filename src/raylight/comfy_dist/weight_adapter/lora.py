@@ -14,6 +14,20 @@ from .base import (
 )
 
 
+def _bypass_operands(adapter, up, down, device, dtype):
+    """Get the bypass operands onto the compute device.
+
+    A chunked bypass forward holds them for its slices, so the slices share one cast.
+    """
+    held = getattr(adapter, "_bypass_held", None)
+    if held is not None and held[0] == (device, dtype):
+        return held[1], held[2]
+    return (
+        comfy.model_management.cast_to_device(up, device, dtype),
+        comfy.model_management.cast_to_device(down, device, dtype),
+    )
+
+
 class LoraDiff(WeightAdapterTrainBase):
     def __init__(self, weights):
         super().__init__()
@@ -273,8 +287,7 @@ class LoRAAdapter(WeightAdapterBase):
         scale = alpha / rank if alpha is not None else 1.0
         scale *= getattr(self, "multiplier", 1.0)
 
-        up = comfy.model_management.cast_to_device(up, x.device, x.dtype)
-        down = comfy.model_management.cast_to_device(down, x.device, x.dtype)
+        up, down = _bypass_operands(self, up, down, x.device, x.dtype)
 
         is_conv = getattr(self, "is_conv", False)
         conv_dim = getattr(self, "conv_dim", 0)
@@ -308,4 +321,5 @@ class LoRAAdapter(WeightAdapterBase):
             hidden = op(x, down, **kw_dict)
             out = op(hidden, up)
 
-        return out * scale
+        # out is a fresh tensor, scaled in place to skip an output-sized copy
+        return out.mul_(scale)
