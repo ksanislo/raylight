@@ -1078,6 +1078,15 @@ class RayWorker:
         if self.clip_patcher is not None and hasattr(self.clip_patcher, "restore_fsdp_vram"):
             self.clip_patcher.restore_fsdp_vram()
 
+    def _release_encoder_for_sampling(self):
+        """Move the encoder off the card while the diffusion model samples.
+
+        Its sharded weights are evicted when the diffusion model loads, but the
+        embedding held out of the sharding is not, and would otherwise stay on
+        the card until the sampling VRAM is cleared afterwards.
+        """
+        self.offload_clip_vram()
+
     @patch_temp_fix_ck_ops
     @patch_enable_comfy_kitchen_fsdp
     @report_encode_progress
@@ -1393,6 +1402,8 @@ class RayWorker:
         import comfy.utils as comfy_utils
         import latent_preview
 
+        self._release_encoder_for_sampling()
+
         for cond_list in _get_guider_conditionings(guider_spec):
             _restore_controlnet_refs(cond_list, self.cached_controlnet, self.vae_model)
             _remap_conditioning_devices(cond_list, None)
@@ -1490,6 +1501,8 @@ class RayWorker:
         import comfy.model_management as comfy_model_management
         import comfy.sample as comfy_sample
         import comfy.utils as comfy_utils
+
+        self._release_encoder_for_sampling()
 
         # Restore ControlNet refs from local cache (loaded by load_controlnet)
         _restore_controlnet_refs(positive, self.cached_controlnet, self.vae_model)
@@ -1633,6 +1646,8 @@ class RayWorker:
         import comfy.model_management as comfy_model_management
         import comfy.sample as comfy_sample
         import comfy.utils as comfy_utils
+
+        self._release_encoder_for_sampling()
 
         # Restore ControlNet refs from local cache (loaded by load_controlnet)
         _restore_controlnet_refs(positive, self.cached_controlnet, self.vae_model)
