@@ -1962,8 +1962,9 @@ class RayCLIPLoader:
 class RayVAELoader:
     """Load a VAE model into all Ray workers.
 
-    Loads the VAE on each worker's GPU from disk.  Used by RayControlNetApply
-    when the ControlNet requires a VAE (e.g. for encoding the control image).
+    Loads the VAE on each worker's GPU from disk. Feeds the distributed decode,
+    and RayControlNetApply when the ControlNet requires a VAE (e.g. for encoding
+    the control image).
     """
 
     @classmethod
@@ -1981,12 +1982,13 @@ class RayVAELoader:
     CATEGORY = "Raylight"
 
     def load_vae(self, ray_actors, vae_name):
-        vae_path = folder_paths.get_full_path_or_raise("vae", vae_name)
+        ray_vae = {"vae_path": folder_paths.get_full_path_or_raise("vae", vae_name)}
+        _load_ray_vae(ray_actors["workers"], ray_vae)
+        return (ray_vae,)
 
-        gpu_actors = ray_actors["workers"]
-        ray.get([actor.ray_vae_loader.remote(vae_path) for actor in gpu_actors])
 
-        return (vae_path,)
+def _load_ray_vae(gpu_actors, ray_vae):
+    ray.get([actor.ray_vae_loader.remote(ray_vae["vae_path"]) for actor in gpu_actors])
 
 
 class Noise_RandomNoise:
@@ -2135,7 +2137,7 @@ class RayVAEDecodeDistributed:
             "required": {
                 "ray_actors": ("RAY_ACTORS", {"tooltip": "Ray Actor to submit the model into"}),
                 "samples": ("LATENT", {"tooltip": "Latent samples to decode."}),
-                "vae_name": (folder_paths.get_filename_list("vae"), {"tooltip": "Name of the VAE model to use for decoding."}),
+                "ray_vae": ("RAY_VAE", {"tooltip": "The VAE from Load VAE (Ray)."}),
                 "tile_size": (
                     "INT",
                     {
@@ -2180,14 +2182,13 @@ class RayVAEDecodeDistributed:
 
     # -- Komikndr
     # By default VAE on comfy already "Parallelized" through tiling, so just distributed the tiling to other rank
-    def ray_decode(self, ray_actors, vae_name, samples, tile_size, overlap=64, temporal_size=64, temporal_overlap=8):
+    def ray_decode(self, ray_actors, samples, ray_vae, tile_size, overlap=64, temporal_size=64, temporal_overlap=8):
         gpu_actors = ray_actors["workers"]
         if not gpu_actors:
             raise ValueError("Distributed VAE (Ray) requires at least one Ray worker.")
-        vae_path = folder_paths.get_full_path_or_raise("vae", vae_name)
 
-        for actor in gpu_actors:
-            ray.get(actor.ray_vae_loader.remote(vae_path))
+        # a no-op when the loader's VAE is still cached; reloads it when a free released it
+        _load_ray_vae(gpu_actors, ray_vae)
 
         from raylight import decode_progress
 
