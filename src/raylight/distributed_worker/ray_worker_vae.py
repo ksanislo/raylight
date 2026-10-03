@@ -154,6 +154,157 @@ def temporal_chunk_model(vae):
     return model
 
 
+def sharded_decoder(vae):
+    return getattr(getattr(vae, "first_stage_model", None), "_raylight_sharded_decoder", None)
+
+
+def shard_vae_decoder(vae, device_mesh):
+    """Shard a temporal-chunk VAE's transformer decoder across the ranks.
+
+    The MiniMax H3 decoder is a 36-block ViT holding 4.6 GiB of the VAE's 5.2 GiB,
+    so it is the weights, not the activations, that set a decode's peak. Sharded,
+    each rank holds a slice and gathers one block at a time while it decodes its
+    own chunks.
+
+    The decoder is taken out of the VAE's module tree first. ComfyUI's patcher
+    then manages only what is left - the encoder and the latent convs, which
+    encode and the decode's pre- and post-processing use as before - and never
+    meets a sharded parameter. The VAE still reaches it as .decoder.
+    """
+    from torch.distributed.fsdp import fully_shard
+    from comfy.quant_ops import QuantizedTensor
+
+    model = temporal_chunk_model(vae)
+    decoder = getattr(model, "decoder", None) if model is not None else None
+    blocks = getattr(decoder, "transformer_blocks", None)
+    if not isinstance(blocks, torch.nn.ModuleList) or len(blocks) == 0:
+        raise ValueError(
+            "Sharding the VAE needs a temporal-chunk VAE whose decoder is a stack of "
+            "transformer blocks; this VAE is not one. Turn shard_weights off.")
+    if any(isinstance(p, QuantizedTensor) for p in decoder.parameters()):
+        raise ValueError("Sharding a quantized VAE decoder is not supported. Turn shard_weights off.")
+
+    # plain attributes: assigning a Module the usual way registers it as a child again
+    del model._modules["decoder"]
+    object.__setattr__(model, "decoder", decoder)
+    object.__setattr__(model, "_raylight_sharded_decoder", decoder)
+    # both cached sizes counted the decoder
+    vae.size = None
+    vae.patcher.size = 0
+
+    # A dynamic patcher assigns the checkpoint's tensors as they are and casts at
+    # use; the decoder no longer passes through it, so it takes the VAE's dtype here.
+    decoder.to(vae.vae_dtype)
+    decoder.requires_grad_(False)
+
+    for block in blocks:
+        fully_shard(block, mesh=device_mesh, reshard_after_forward=True)
+    fully_shard(decoder, mesh=device_mesh, reshard_after_forward=True)
+    return decoder
+
+
+def offload_sharded_decoder(vae):
+    """Move a sharded decoder's shards to host memory between decodes.
+
+    ComfyUI's memory management does not know the decoder is there, so it could
+    never evict it for the diffusion model; parked on the host it is not in the
+    way. Whole storages are saved, so a shard padded to an uneven split comes
+    back with its padding.
+    """
+    decoder = sharded_decoder(vae)
+    if decoder is None or getattr(decoder, "_raylight_host_shards", None) is not None:
+        return
+    # the root stays gathered after a forward
+    decoder.reshard()
+    saved = {}
+    for param in decoder.parameters():
+        local = getattr(param, "_local_tensor", None)
+        if local is None:
+            local = param.to_local()
+        storage = local.untyped_storage()
+        if storage.nbytes() == 0 or storage.data_ptr() in saved:
+            continue
+        host = torch.empty(storage.nbytes(), dtype=torch.uint8)
+        host.untyped_storage().copy_(storage)
+        saved[storage.data_ptr()] = (storage, host)
+    for storage, _ in saved.values():
+        storage.resize_(0)
+    decoder._raylight_host_shards = list(saved.values())
+
+
+def restore_sharded_decoder(vae):
+    decoder = sharded_decoder(vae)
+    saved = getattr(decoder, "_raylight_host_shards", None) if decoder is not None else None
+    if saved is None:
+        return
+    for storage, host in saved:
+        storage.resize_(host.numel())
+        storage.copy_(host.untyped_storage())
+    decoder._raylight_host_shards = None
+
+
+def sharded_decoder_vram(vae):
+    # this rank's shards, plus a gathered block in use and the next one prefetching
+    decoder = sharded_decoder(vae)
+    if decoder is None:
+        return 0
+    shards = sum(host.numel() for _, host in getattr(decoder, "_raylight_host_shards", None) or ())
+    block = max(sum(p.numel() * p.element_size() for p in b.parameters()) for b in decoder.transformer_blocks)
+    return shards + 2 * block
+
+
+@contextlib.contextmanager
+def _agreed_free_memory(device):
+    """Make every rank see the smallest free-memory figure of any rank.
+
+    The decoder sizes its tile batches from free memory, and with sharded weights
+    the ranks gather together, so they must make the same number of decoder calls
+    in the same shapes. Ranks are in lockstep inside the decode, so each query
+    becomes a collective that all of them reach. Other threads see the real figure.
+    """
+    import threading
+    import torch.distributed as dist
+
+    original = comfy_model_management.get_free_memory
+    decoding_thread = threading.get_ident()
+
+    def agreed(dev=None, torch_free_too=False):
+        result = original(dev, torch_free_too)
+        if threading.get_ident() != decoding_thread:
+            return result
+        values = result if torch_free_too else (result,)
+        t = torch.tensor(values, dtype=torch.float64, device=device)
+        dist.all_reduce(t, op=dist.ReduceOp.MIN)
+        values = tuple(int(v) for v in t.tolist())
+        return values if torch_free_too else values[0]
+
+    comfy_model_management.get_free_memory = agreed
+    try:
+        yield
+    finally:
+        comfy_model_management.get_free_memory = original
+
+
+@contextlib.contextmanager
+def _sharded_decode(vae):
+    # the shards are on the card for exactly as long as the decode runs
+    restore_sharded_decoder(vae)
+    try:
+        with _agreed_free_memory(vae.device):
+            yield
+    finally:
+        offload_sharded_decoder(vae)
+
+
+def _agreed_cancel(device):
+    # one rank leaving mid-decode would strand the rest in the next gather
+    import torch.distributed as dist
+
+    flag = torch.tensor([1 if progress.cancel_requested() else 0], dtype=torch.int32, device=device)
+    dist.all_reduce(flag, op=dist.ReduceOp.MAX)
+    return bool(flag.item())
+
+
 def _normalize_latents(model, z):
     latents_mean = model.latents_mean.view(1, -1, 1, 1, 1).to(z)
     latents_std = model.latents_std.view(1, -1, 1, 1, 1).to(z)
@@ -235,14 +386,25 @@ def ray_vae_decode_temporal_partial_impl(worker, samples, job_rank=0, job_world_
     if latent.ndim != 5:
         raise ValueError(f"Distributed VAE (Ray) temporal decode expects a 5D latent, got {latent.ndim}D.")
 
-    memory_used = vae.memory_used_decode(latent.shape, vae.vae_dtype)
+    sharded = sharded_decoder(vae) is not None
+    if sharded:
+        import torch.distributed as dist
+
+        if job_world_size != dist.get_world_size():
+            raise ValueError(
+                f"A sharded VAE decodes on every rank of its process group ({dist.get_world_size()}), "
+                f"but this decode was given {job_world_size}. Turn shard_weights off.")
+
+    # the patcher no longer holds the sharded decoder, so its room is asked for here
+    memory_used = vae.memory_used_decode(latent.shape, vae.vae_dtype) + sharded_decoder_vram(vae)
     with _decode_vram_reserve(vae, memory_used):
         model_management.load_models_gpu([vae.patcher], memory_required=memory_used, force_full_load=vae.disable_offload)
 
         output_shape = tuple(model.decode_output_shape(latent.shape))
 
         chunks = []
-        with model_management.cuda_device_context(vae.device), torch.no_grad():
+        lockstep = _sharded_decode(vae) if sharded else contextlib.nullcontext()
+        with model_management.cuda_device_context(vae.device), torch.no_grad(), lockstep:
             z = _normalize_latents(model, latent.to(vae.device, dtype=vae.vae_dtype))
             pad_tokens, num_chunks = model._decode_temporal_chunks(z.shape[2])
             if pad_tokens > 0:
@@ -256,18 +418,26 @@ def ray_vae_decode_temporal_partial_impl(worker, samples, job_rank=0, job_world_
             if job_rank == 0:
                 decode_progress.write("video_stitch", 0, num_chunks)
 
-            for chunk_index in range(num_chunks):
-                if chunk_index % job_world_size != job_rank:
-                    continue
+            # Sharded ranks gather every block together, so each makes the same number
+            # of decoder calls: one short of a full round re-decodes a chunk and drops it.
+            # Every chunk is the same length, so the spare call has the same shapes.
+            rounds = -(-num_chunks // job_world_size) if sharded else mine
+            for round_index in range(rounds):
+                chunk_index = round_index * job_world_size + job_rank
                 #One cancel check per chunk - at most a small board call, usually a cached
                 #answer - against a chunk that takes far longer to decode.
                 #Without it a cancel is not noticed until the whole decode is over,
                 #which for a long clip is most of what there was to cancel.
-                if progress.cancel_requested():
+                if _agreed_cancel(vae.device) if sharded else progress.cancel_requested():
                     raise comfy_model_management.InterruptProcessingException()
-                t_start_idx = chunk_index * model.tokens_chunk_size
+                spare = chunk_index >= num_chunks
+                source_index = num_chunks - 1 if spare else chunk_index
+                t_start_idx = source_index * model.tokens_chunk_size
                 t_end_idx = t_start_idx + model.tokens_chunk_size + model.token_overlap
                 clip_dec = model._adaptive_decode(z[:, :, t_start_idx:t_end_idx, :, :])
+                if spare:
+                    del clip_dec
+                    continue
                 chunks.append((chunk_index, clip_dec.to(device="cpu", copy=True)))
                 decode_progress.write(f"video_rank{job_rank}", len(chunks), mine)
 
