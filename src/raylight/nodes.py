@@ -2117,24 +2117,28 @@ class DPLatentList:
         return (latents,)
 
 
-def _ray_get_cancellable(futures, ray_actors=None):
+def _ray_get_cancellable(futures, ray_actors=None, report=False):
     """ray.get that still notices an interrupt.
 
     A plain ray.get blocks until the work is finished, so a cancel during a long
     decode is only seen once there is nothing left to cancel. Poll instead, and
     handle a cancel the way sampling does: ask over the side channel, keep the
-    workers that answer, end the ones that do not.
+    workers that answer, end the ones that do not. With `report`, each poll also
+    shows what the workers have published of the decode's progress.
     """
     import comfy.model_management
-    from raylight import progress
+    from raylight import decode_progress, progress
     from raylight.distributed_worker.ray_worker import retire_actors
 
     single = not isinstance(futures, (list, tuple))
     pending = [futures] if single else list(futures)
     waiting = list(pending)
+    relay = decode_progress.Relay() if report else None
     try:
         while pending:
             _ready, pending = ray.wait(pending, num_returns=len(pending), timeout=0.5)
+            if relay is not None:
+                relay.poll()
             comfy.model_management.throw_exception_if_processing_interrupted()
         return ray.get(waiting[0] if single else waiting)
     except comfy.model_management.InterruptProcessingException:
@@ -2212,6 +2216,10 @@ class RayVAEDecodeDistributed:
         for actor in gpu_actors:
             ray.get(actor.ray_vae_loader.remote(vae_path))
 
+        from raylight import decode_progress
+
+        decode_progress.clear()
+
         # VAEs that decode in temporal chunks are split along time instead of tiled,
         # which needs no feathering and keeps each rank's peak independent of clip length
         if ray.get(gpu_actors[0].ray_vae_supports_temporal_chunks.remote()):
@@ -2226,7 +2234,7 @@ class RayVAEDecodeDistributed:
             # passed as separate arguments so Ray resolves them on the combining worker;
             # collecting them here first would copy every chunk through the driver
             image = _ray_get_cancellable(
-                gpu_actors[0].ray_vae_decode_temporal_combine.remote(*futures), ray_actors)
+                gpu_actors[0].ray_vae_decode_temporal_combine.remote(*futures), ray_actors, report=True)
             _free_ray_worker_vram_after_decode(ray_actors)
             return (image,)
 
@@ -2243,7 +2251,7 @@ class RayVAEDecodeDistributed:
             for i, actor in enumerate(gpu_actors)
         ]
 
-        worker_partials = _ray_get_cancellable(futures, ray_actors)
+        worker_partials = _ray_get_cancellable(futures, ray_actors, report=True)
         decoded = combine_dist_vae_partials(worker_partials)
         image = ray.get(gpu_actors[0].ray_vae_decode_finalize.remote(decoded.cpu()))
         _free_ray_worker_vram_after_decode(ray_actors)
