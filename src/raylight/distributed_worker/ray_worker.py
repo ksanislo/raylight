@@ -1139,6 +1139,9 @@ class RayWorker:
         if self.clip is not None and self.clip_key == key:
             return
 
+        #Before the load: it measures what is free to decide whether the shards
+        #can live in vram, and a resident diffusion model would make it say no.
+        self._release_model_for_encode()
         self._free_current_clip()
 
         from raylight.comfy_dist.sd import fsdp_load_text_encoder
@@ -1204,6 +1207,26 @@ class RayWorker:
 
     @patch_temp_fix_ck_ops
     @patch_enable_comfy_kitchen_fsdp
+    def _release_model_for_encode(self):
+        """Move the diffusion model's shards off the card while the encoder runs.
+
+        Sampling already moves the encoder off before it starts; this is the
+        other direction. With the diffusion model kept resident (no FSDP CPU
+        offload) the two compete for the card during an encode: on two T4s
+        either one fits beside its working set but both together do not, and on
+        four they leave under a gigabyte spare on a cold start. The samplers
+        restore the shards before they need them, so this is paid once per
+        encode that actually runs - a cached prompt skips it. Shards already on
+        the host are left alone.
+        """
+        offload = getattr(self.model, "offload_fsdp_vram", None) if self.model is not None else None
+        if offload is None:
+            return
+        try:
+            offload()
+        except Exception as e:
+            print(f"[Rank {self.local_rank}] could not move the diffusion model off the card for the encode: {e}")
+
     def prepare_clip(self, tokens):
         """Load and shard the encoder onto this rank's card, with no collectives.
 
@@ -1217,6 +1240,7 @@ class RayWorker:
         """
         if self.clip is None:
             raise RuntimeError("prepare_clip called before load_clip")
+        self._release_model_for_encode()
         if self.clip_state_dict is not None:
             self.set_clip_state_dict()
         self.restore_clip_vram()
