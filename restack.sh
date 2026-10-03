@@ -202,7 +202,7 @@ if [ "$CONTINUE" -eq 1 ]; then
     if [ -e "$(git rev-parse --git-path CHERRY_PICK_HEAD)" ]; then
         # Finish it here rather than trusting that it was finished elsewhere.
         say "completing the in-progress cherry-pick of $head"
-        git diff --name-only --diff-filter=U | grep -q . \
+        [ -n "$(git diff --name-only --diff-filter=U)" ] \
             && die "unresolved conflicts remain; resolve and 'git add' them first"
         git add -u
         git "${RR[@]}" -c core.editor=true cherry-pick --continue >/dev/null 2>&1 || true
@@ -213,9 +213,13 @@ if [ "$CONTINUE" -eq 1 ]; then
         # Assuming it completed is how a branch gets silently skipped, so verify
         # by subject before dropping it.
         base="$(git merge-base "$(base_ref_of "$head")" "$head")"
+        # Read once, then searched: piped into grep -q, the log can be cut off when grep
+        # matches early, and under pipefail that SIGPIPE turns a match into "missing" -
+        # which re-picks a branch that is already in.
+        assembled="$(git log --no-merges --format='%s' "$BASE_SHA..HEAD")"
         while read -r subj; do
             [ -z "$subj" ] && continue
-            git log --no-merges --format='%s' "$BASE_SHA..HEAD" | grep -qxF "$subj" || {
+            grep -qxF "$subj" <<< "$assembled" || {
                 warn "$head is not in the assembly (missing \"$subj\") - re-attempting it"
                 ASSEMBLE=("${ASSEMBLE[@]}"); head=""; break; }
         done < <(git log --no-merges --format='%s' "$base..$head")
