@@ -44,11 +44,13 @@ from raylight.distributed_worker.ray_worker_controlnet import (
 )
 from raylight.distributed_worker.ray_worker_vae import (
     load_vae_model,
+    offload_sharded_decoder,
     ray_vae_decode_finalize_impl,
     ray_vae_decode_partial_impl,
     ray_vae_decode_temporal_combine_impl,
     ray_vae_decode_temporal_partial_impl,
     ray_seedvr2_vae_decode_partial_impl,
+    shard_vae_decoder,
     temporal_chunk_model,
 )
 from raylight.distributed_worker.utils import Noise_EmptyNoise, Noise_RandomNoise, patch_ray_tqdm
@@ -704,10 +706,10 @@ class RayWorker:
         if self.vae_model is not None:
             del self.vae_model
             self.vae_model = None
-            self._cached_vae_path = None
+            self._cached_vae_key = None
 
-        torch.cuda.empty_cache()
         gc.collect()
+        torch.cuda.empty_cache()
 
     def clear_sampling_vram(self):
         """Release worker-side CUDA memory after a Ray sampling node finishes.
@@ -1237,23 +1239,40 @@ class RayWorker:
         dist.destroy_process_group()
         ray.actor.exit_actor()
 
-    def ray_vae_loader(self, vae_path):
-        if self.vae_model is not None and getattr(self, "_cached_vae_path", None) == vae_path:
+    def ray_vae_loader(self, vae_path, shard_weights=False):
+        key = (vae_path, bool(shard_weights))
+        if self.vae_model is not None and getattr(self, "_cached_vae_key", None) == key:
             return
 
         # Free old VAE before loading new one
         if self.vae_model is not None:
             del self.vae_model
             self.vae_model = None
-            self._cached_vae_path = None
+            self._cached_vae_key = None
+            # a sharded decoder is held in reference cycles by its FSDP state
+            gc.collect()
             torch.cuda.empty_cache()
 
         vae_model = load_vae_model(vae_path)
+        if shard_weights:
+            shard_vae_decoder(vae_model, self._vae_device_mesh())
+            # parked on the host until a decode needs it
+            offload_sharded_decoder(vae_model)
 
         if self.local_rank == 0:
-            print(f"VAE loaded in {self.global_world_size} GPUs")
+            how = "sharded across" if shard_weights else "loaded in"
+            print(f"VAE {how} {self.global_world_size} GPUs")
         self.vae_model = vae_model
-        self._cached_vae_path = vae_path
+        self._cached_vae_key = key
+
+    def _vae_device_mesh(self):
+        # the mesh exists only when the diffusion model is parallel; a sharded VAE
+        # needs one either way, over the same process group
+        if self.device_mesh is not None:
+            return self.device_mesh
+        if getattr(self, "_vae_mesh", None) is None:
+            self._vae_mesh = dist.device_mesh.init_device_mesh("cuda", mesh_shape=(dist.get_world_size(),))
+        return self._vae_mesh
 
     @patch_ray_tqdm
     def ray_vae_decode_partial(self, samples, tile_size, overlap=64, temporal_size=64, temporal_overlap=8, job_rank=0, job_world_size=1):
@@ -1506,9 +1525,9 @@ class RayWorker:
         if self.vae_model is not None:
             del self.vae_model
             self.vae_model = None
-            self._cached_vae_path = None
-            torch.cuda.empty_cache()
+            self._cached_vae_key = None
             gc.collect()
+            torch.cuda.empty_cache()
             if self.local_rank == 0:
                 print(f"[Rank {self.local_rank}] VAE cache freed")
 

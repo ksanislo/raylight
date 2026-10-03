@@ -1699,6 +1699,17 @@ class RayVAELoader:
             "required": {
                 "ray_actors": ("RAY_ACTORS",),
                 "vae_name": (folder_paths.get_filename_list("vae"),),
+                "shard_weights": (
+                    "BOOLEAN",
+                    {
+                        "display_name": "Shard weights (FSDP)",
+                        "default": False,
+                        "tooltip": "Split the VAE decoder's weights across the workers instead of giving every card a full copy. "
+                                   "Saves most of the decoder's size per card (about 3 GiB on four cards for MiniMax H3) at the cost "
+                                   "of gathering each block during the decode. Output is unchanged. Only for VAEs that decode in "
+                                   "temporal chunks with a transformer decoder.",
+                    },
+                ),
             }
         }
 
@@ -1712,14 +1723,15 @@ class RayVAELoader:
     FUNCTION = "load_vae"
     CATEGORY = "Raylight"
 
-    def load_vae(self, ray_actors, vae_name):
-        ray_vae = {"vae_path": folder_paths.get_full_path_or_raise("vae", vae_name)}
+    def load_vae(self, ray_actors, vae_name, shard_weights=False):
+        ray_vae = {"vae_path": folder_paths.get_full_path_or_raise("vae", vae_name), "shard_weights": shard_weights}
         _load_ray_vae(ray_actors["workers"], ray_vae)
         return (ray_vae, _LazyHostVAE(vae_name))
 
 
 def _load_ray_vae(gpu_actors, ray_vae):
-    ray.get([actor.ray_vae_loader.remote(ray_vae["vae_path"]) for actor in gpu_actors])
+    # all at once: a sharded load is issued on every rank of the group
+    ray.get([actor.ray_vae_loader.remote(ray_vae["vae_path"], ray_vae["shard_weights"]) for actor in gpu_actors])
 
 
 class Noise_RandomNoise:
