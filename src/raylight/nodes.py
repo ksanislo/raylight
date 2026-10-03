@@ -454,8 +454,8 @@ class RayInitializer:
                 "clear_vram_after_sampling": (
                     "BOOLEAN",
                     {
-                        "default": False,
-                        "tooltip": "Release Ray worker VRAM after sampling so regular Comfy nodes can use the GPU.",
+                        "default": True,
+                        "tooltip": "On: each step frees the workers' VRAM when it finishes, so a run ends with the cards empty for the next run or for anything outside ComfyUI. Off: keep what fits resident for reuse, and ComfyUI frees it when a later step needs the room.",
                     },
                 ),
                 "FSDP": ("BOOLEAN", {"default": False, "tooltip": "Enable FSDP weight sharding across GPUs."}),
@@ -751,9 +751,9 @@ class RayInitializerAdvanced(RayInitializer):
                 ),
                 "clear_vram_after_sampling": (
                     "BOOLEAN",
-                    {"display_name": "Clear VRAM after sampling", 
-                        "default": False,
-                        "tooltip": "Release Ray worker VRAM after sampling so regular Comfy nodes can use the GPU.",
+                    {"display_name": "Free VRAM",
+                        "default": True,
+                        "tooltip": "On: each step frees the workers' VRAM when it finishes, so a run ends with the cards empty for the next run or for anything outside ComfyUI. Off: keep what fits resident for reuse, and ComfyUI frees it when a later step needs the room.",
                     },
                 ),
                 "XFuser_attention": (
