@@ -553,6 +553,9 @@ class RayWorker:
         worker_cli_args = _apply_worker_comfy_cli_args_from_env()
         self.model = None
         self.vae_model = None
+        # audio has its own slot, so decoding it never evicts the video VAE
+        self.audio_vae_model = None
+        self._cached_audio_vae_path = None
         self.model_type = None
         self.state_dict = None
         self.cached_controlnet = None  # (path, controlnet_object) cache
@@ -1500,6 +1503,32 @@ class RayWorker:
             gc.collect()
             if self.local_rank == 0:
                 print(f"[Rank {self.local_rank}] ControlNet cache freed")
+
+    def free_cached_audio_vae(self):
+        """Free the cached audio VAE."""
+        if self.audio_vae_model is not None:
+            del self.audio_vae_model
+            self.audio_vae_model = None
+            self._cached_audio_vae_path = None
+            torch.cuda.empty_cache()
+            gc.collect()
+
+    @patch_temp_fix_ck_ops
+    def ray_audio_vae_decode(self, vae_path, samples):
+        """Decode audio latents the way VAEDecodeAudio does, on this worker.
+
+        Uses ComfyUI's own vae_decode_audio, so any audio VAE it can load decodes
+        here as it would on the host, and the waveform comes back on the CPU.
+        """
+        from comfy_extras.nodes_audio import vae_decode_audio
+
+        if self.audio_vae_model is None or self._cached_audio_vae_path != vae_path:
+            self.free_cached_audio_vae()
+            self.audio_vae_model = load_vae_model(vae_path)
+            self._cached_audio_vae_path = vae_path
+        with torch.inference_mode():
+            audio = vae_decode_audio(self.audio_vae_model, samples)
+        return {"waveform": audio["waveform"].cpu(), "sample_rate": audio["sample_rate"]}
 
     def free_cached_vae(self):
         """Explicitly free the cached VAE (e.g. when switching workflows)."""
