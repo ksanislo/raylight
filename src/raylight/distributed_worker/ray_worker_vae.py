@@ -1,7 +1,7 @@
 import torch
 
 import comfy.model_management as comfy_model_management
-from raylight import progress
+from raylight import decode_progress, progress
 
 
 def load_vae_model(vae_path):
@@ -189,6 +189,13 @@ def ray_vae_decode_temporal_partial_impl(worker, samples, job_rank=0, job_world_
             pad_z = z[:, :, -1:, :, :].repeat(1, 1, pad_tokens, 1, 1)
             z = torch.cat([z, pad_z], dim=2)
 
+        # every share is declared before any decoding, so the host's total is whole
+        # from the start; rank 0 also declares the stitch it will do afterwards
+        mine = len(range(job_rank, num_chunks, job_world_size))
+        decode_progress.write(f"video_rank{job_rank}", 0, mine)
+        if job_rank == 0:
+            decode_progress.write("video_stitch", 0, num_chunks)
+
         for chunk_index in range(num_chunks):
             if chunk_index % job_world_size != job_rank:
                 continue
@@ -201,6 +208,7 @@ def ray_vae_decode_temporal_partial_impl(worker, samples, job_rank=0, job_world_
             t_end_idx = t_start_idx + model.tokens_chunk_size + model.token_overlap
             clip_dec = model._adaptive_decode(z[:, :, t_start_idx:t_end_idx, :, :])
             chunks.append((chunk_index, clip_dec.to(device="cpu", copy=True)))
+            decode_progress.write(f"video_rank{job_rank}", len(chunks), mine)
 
     return {
         "mode": "temporal",
@@ -284,6 +292,7 @@ def combine_temporal_vae_chunks(model, device, output_shape, chunks):
         if chunk_index == last_index and dec_overlap is not None:
             write_part(dec_overlap)
             dec_overlap = None
+        decode_progress.write("video_stitch", chunk_index + 1, len(chunks))
 
     return dec
 
