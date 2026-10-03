@@ -18,7 +18,8 @@ class _Actor:
 
 @pytest.fixture
 def fake_ray(monkeypatch):
-    monkeypatch.setattr(nodes, "ray", types.SimpleNamespace(get=lambda refs: refs))
+    monkeypatch.setattr(nodes, "ray", types.SimpleNamespace(get=lambda refs: refs,
+                                                            wait=lambda refs, timeout=None: (refs, [])))
 
 
 @pytest.mark.parametrize("clear, expected", [
