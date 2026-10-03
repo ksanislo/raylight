@@ -2263,7 +2263,17 @@ class RayVAEDecodeAudio:
         if "sample_rate" in samples:
             job["sample_rate"] = samples["sample_rate"]
 
-        audio = ray.get(gpu_actors[-1].ray_audio_vae_decode.remote(vae_path, job))
+        import comfy.model_management
+        from raylight import decode_progress
+
+        decode_progress.clear()
+        ref = gpu_actors[-1].ray_audio_vae_decode.remote(vae_path, job)
+        relay = decode_progress.Relay()
+        while not ray.wait([ref], timeout=0.5)[0]:
+            relay.poll()
+            comfy.model_management.throw_exception_if_processing_interrupted()
+        relay.poll()
+        audio = ray.get(ref)
         _free_ray_worker_vram_after_decode(ray_actors)
         return (audio,)
 

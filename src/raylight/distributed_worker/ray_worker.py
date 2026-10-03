@@ -576,6 +576,20 @@ def report_progress(fn):
     return wrapper
 
 
+def _callable_blocks(module):
+    """The repeated blocks a decoder runs, for counting its progress.
+
+    Its ModuleLists hold them, sometimes nested a level (an upsampling stage that
+    is itself a list); those are flattened to the modules that are actually called.
+    """
+    blocks = []
+    for child in module.children():
+        if isinstance(child, torch.nn.ModuleList):
+            for item in child:
+                blocks.extend(item if isinstance(item, torch.nn.ModuleList) else [item])
+    return blocks
+
+
 class RayWorker:
     def __init__(self, local_rank, device_id, parallel_dict):
         worker_cli_args = _apply_worker_comfy_cli_args_from_env()
@@ -1768,13 +1782,30 @@ class RayWorker:
         here as it would on the host, and the waveform comes back on the CPU.
         """
         from comfy_extras.nodes_audio import vae_decode_audio
+        from raylight import decode_progress
 
         if self.audio_vae_model is None or self._cached_audio_vae_path != vae_path:
             self.free_cached_audio_vae()
             self.audio_vae_model = load_vae_model(vae_path)
             self._cached_audio_vae_path = vae_path
-        with torch.inference_mode():
-            audio = vae_decode_audio(self.audio_vae_model, samples)
+
+        # one forward pass, so progress is counted in the decoder's blocks
+        model = self.audio_vae_model.first_stage_model
+        blocks = _callable_blocks(getattr(model, "decoder", model))
+        done = [0]
+
+        def on_block(_module, _args, _output):
+            done[0] += 1
+            decode_progress.write("audio", done[0], len(blocks))
+
+        handles = [block.register_forward_hook(on_block) for block in blocks]
+        decode_progress.write("audio", 0, len(blocks))
+        try:
+            with torch.inference_mode():
+                audio = vae_decode_audio(self.audio_vae_model, samples)
+        finally:
+            for handle in handles:
+                handle.remove()
         return {"waveform": audio["waveform"].cpu(), "sample_rate": audio["sample_rate"]}
 
     def free_cached_vae(self):
