@@ -77,6 +77,24 @@ def _free_host_vram_before_worker_load():
     comfy.model_management.soft_empty_cache()
 
 
+def _free_ray_worker_vram_after_decode(ray_actors):
+    """Release the workers' VRAM once a decode is done, under the same setting.
+
+    The decode is the last stage that runs on the workers, and the VAE it loads
+    stays cached on every card afterwards. Clearing after sampling runs before it
+    is loaded, so without this the run ends with the VAE still resident.
+    """
+    gpu_actors = ray_actors["workers"]
+    if not gpu_actors:
+        return
+    parallel_dict = ray.get(gpu_actors[0].get_parallel_dict.remote())
+    if not parallel_dict.get("clear_vram_after_sampling", False):
+        return
+
+    ray.get([actor.free_cached_vae.remote() for actor in gpu_actors])
+    ray.get([actor.clear_sampling_vram.remote() for actor in gpu_actors])
+
+
 def _raylight_ray_tmpdir() -> Path:
     return Path(os.environ.get("RAYLIGHT_RAY_TMPDIR", Path(tempfile.gettempdir()) / "raylight-ray")).resolve()
 
@@ -2208,6 +2226,7 @@ class RayVAEDecodeDistributed:
             # collecting them here first would copy every chunk through the driver
             image = _ray_get_cancellable(
                 gpu_actors[0].ray_vae_decode_temporal_combine.remote(*futures), ray_actors)
+            _free_ray_worker_vram_after_decode(ray_actors)
             return (image,)
 
         futures = [
@@ -2226,6 +2245,7 @@ class RayVAEDecodeDistributed:
         worker_partials = _ray_get_cancellable(futures, ray_actors)
         decoded = combine_dist_vae_partials(worker_partials)
         image = ray.get(gpu_actors[0].ray_vae_decode_finalize.remote(decoded.cpu()))
+        _free_ray_worker_vram_after_decode(ray_actors)
         return (image,)
 
 
@@ -2277,6 +2297,7 @@ class RaySeedVR2VAEDecodeDistributed:
         ])
         decoded = combine_seedvr2_vae_partials(worker_partials)
         image = ray.get(gpu_actors[0].ray_vae_decode_finalize.remote(decoded))
+        _free_ray_worker_vram_after_decode(ray_actors)
         return (image,)
 
 
