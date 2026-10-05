@@ -412,6 +412,35 @@ class RayDualCFGGuider:
         )
 
 
+def _gather_with_progress(futures):
+    """Wait on the sampling futures while relaying worker progress to the UI.
+
+    ray.get() would block until sampling finished, leaving the node at 0% for
+    the whole render. Poll instead, and forward whatever rank 0 published to a
+    host-side ProgressBar, which does have the server's hook attached.
+    """
+    import comfy.utils
+    from raylight import progress
+
+    pending = list(futures)
+    pbar = comfy.utils.ProgressBar(1)
+    last = None
+    last_preview_seq = -1
+    preview = None
+    while pending:
+        _ready, pending = ray.wait(pending, num_returns=len(pending), timeout=0.5)
+        current = progress.read()
+        if current is not None and current != last:
+            last = current
+            value, total, preview_seq = current
+            if preview_seq != last_preview_seq:
+                last_preview_seq = preview_seq
+                image = progress.read_preview()
+                preview = ("JPEG", image, 512) if image is not None else None
+            pbar.update_absolute(min(value, total), total, preview)
+    return ray.get(futures)
+
+
 class XFuserSamplerCustomAdvanced:
     @classmethod
     def INPUT_TYPES(s):
@@ -456,7 +485,7 @@ class XFuserSamplerCustomAdvanced:
             )
             for actor in gpu_actors
         ]
-        results = ray.get(futures)
+        results = _gather_with_progress(futures)
         _clear_ray_worker_vram_after_sampling(ray_actors)
         output, denoised_output = results[0]
         return (output, denoised_output, ray_actors)
@@ -532,7 +561,7 @@ class XFuserSamplerCustom:
             )
             for actor in gpu_actors
         ]
-        results = ray.get(futures)
+        results = _gather_with_progress(futures)
         _clear_ray_worker_vram_after_sampling(ray_actors)
         out = results[0]
         return (out, ray_actors)
@@ -591,7 +620,7 @@ class UnifiedParallelSamplerCustomAdvanced:
             )
             for actor, group_info in zip(gpu_actors, group_infos)
         ]
-        results = ray.get(futures)
+        results = _gather_with_progress(futures)
         _clear_ray_worker_vram_after_sampling(ray_actors)
         results = _collect_grouped_results(results, dp_degree, "Unified Parallel SamplerCustomAdvanced")
         outputs, denoised_outputs = _split_advanced_results(results)
@@ -678,7 +707,7 @@ class UnifiedParallelSamplerCustom:
             )
             for actor, group_info in zip(gpu_actors, group_infos)
         ]
-        results = ray.get(futures)
+        results = _gather_with_progress(futures)
         _clear_ray_worker_vram_after_sampling(ray_actors)
         out = _collect_grouped_results(results, dp_degree, "Unified Parallel SamplerCustom")
         return (out, ray_actors)
@@ -733,7 +762,7 @@ class DPSamplerCustomAdvanced:
             )
             for i, actor in enumerate(gpu_actors)
         ]
-        results = ray.get(futures)
+        results = _gather_with_progress(futures)
         _clear_ray_worker_vram_after_sampling(ray_actors)
         outputs, denoised_outputs = _split_advanced_results(results)
         return (outputs, denoised_outputs, ray_actors)
@@ -823,7 +852,7 @@ class DPSamplerCustom:
             )
             for i, actor in enumerate(gpu_actors)
         ]
-        out = ray.get(futures)
+        out = _gather_with_progress(futures)
         _clear_ray_worker_vram_after_sampling(ray_actors)
         return (out, ray_actors)
 
