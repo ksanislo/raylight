@@ -269,6 +269,44 @@ def _enable_worker_dynamic_vram(worker_cli_args=None):
     )
 
 
+def _reset_cast_buffers():
+    """Release ComfyUI's per-run weight-streaming state, as its executor does.
+
+    ComfyUI's execution loop calls reset_cast_buffers after every node. Workers
+    run outside that loop, so here nothing ever calls it: the stream cast
+    buffers only grow, and LARGEST_AIMDO_CASTED_WEIGHT keeps a strong reference
+    to the largest module ever streamed. A VAE that was streamed while the
+    diffusion model held the card leaves one of its modules there, and with it
+    the VAE's whole vbar - about 1.5 GiB per card for MiniMax H3 - after the
+    worker has dropped the VAE. Call this wherever a worker drops models.
+    """
+    import comfy.model_management as mm
+
+    #reset_cast_buffers also walks the pin bookkeeping of every loaded dynamic
+    #model, which an FSDP model reports being without keeping. While one is
+    #loaded, release only the streaming state, the part that pins memory here.
+    pinless = any(
+        lm.model is not None and lm.model.is_dynamic() and not hasattr(lm.model.model, "dynamic_pins")
+        for lm in getattr(mm, "current_loaded_models", ()))
+    reset = getattr(mm, "reset_cast_buffers", None)
+    if reset is not None and not pinless:
+        try:
+            reset()
+            return
+        except Exception as e:
+            print(f"[Raylight] reset_cast_buffers failed, releasing the cast buffers only: {e}")
+
+    mm.synchronize()
+    for name in ("LARGEST_CASTED_WEIGHT", "LARGEST_AIMDO_CASTED_WEIGHT"):
+        if hasattr(mm, name):
+            setattr(mm, name, (None, 0))
+    for name in ("STREAM_CAST_BUFFERS", "STREAM_AIMDO_CAST_BUFFERS"):
+        buffers = getattr(mm, name, None)
+        if buffers is not None:
+            buffers.clear()
+    mm.soft_empty_cache()
+
+
 def _get_guider_conditionings(guider_spec):
     guider_type = guider_spec.get("type")
     if guider_type == "basic":
@@ -695,6 +733,7 @@ class RayWorker:
 
     def _free_cached_aux_models(self):
         """Free cached ControlNet and VAE GPU memory."""
+        _reset_cast_buffers()
         if self.cached_controlnet is not None:
             _, old_cnet = self.cached_controlnet
             old_model = getattr(old_cnet, "control_model", None)
@@ -722,6 +761,7 @@ class RayWorker:
             comfy_model_management.unload_all_models()
         except Exception as e:
             print(f"[Rank {self.local_rank}] unload_all_models failed in clear_sampling_vram: {e}")
+        _reset_cast_buffers()
 
         #The encoder has already run by the time sampling is done with the card,
         #so it is the one to give up vram first. Offload rather than free: the
@@ -1086,6 +1126,10 @@ class RayWorker:
         the card until the sampling VRAM is cleared afterwards.
         """
         self.offload_clip_vram()
+        #The encode streamed its weights through ComfyUI's cast buffers, sized to
+        #the largest it cast - the embedding table, about 1.45 GiB on MiniMax H3.
+        #Nothing else frees them before sampling needs the card.
+        _reset_cast_buffers()
 
     @patch_temp_fix_ck_ops
     @patch_enable_comfy_kitchen_fsdp
@@ -1381,6 +1425,7 @@ class RayWorker:
 
         # Free old VAE before loading new one
         if self.vae_model is not None:
+            _reset_cast_buffers()
             del self.vae_model
             self.vae_model = None
             self._cached_vae_path = None
@@ -1636,6 +1681,7 @@ class RayWorker:
     def free_cached_vae(self):
         """Explicitly free the cached VAE (e.g. when switching workflows)."""
         if self.vae_model is not None:
+            _reset_cast_buffers()
             del self.vae_model
             self.vae_model = None
             self._cached_vae_path = None
