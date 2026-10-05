@@ -154,8 +154,11 @@ branch feat/single-vae-loader                 onto feat/decode-cancel-and-progre
 # the single-loader branch.
 branch feat/fsdp-vae-decode                   onto feat/single-vae-loader
 # Workers never ran ComfyUI's reset_cast_buffers, so a streamed VAE stayed pinned
-# after the worker dropped it.
-branch fix/worker-reset-cast-buffers          onto base
+# after the worker dropped it, and the encode's cast buffer (sized to the embedding
+# table, 1.45 GiB) stayed through sampling - the margin a 30 s clip at 1344x768
+# needs. Resetting where the encoder steps aside needs that hook, so it sits on the
+# text encoder branch.
+branch fix/worker-reset-cast-buffers          onto feat/fsdp-text-encoder
 # Moves the DiT off the cards while the text encoder runs; needs the per-rank
 # encoder preparation the text encoder branch carries.
 branch fix/offload-dit-while-encoding         onto feat/fsdp-text-encoder
