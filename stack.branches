@@ -64,12 +64,15 @@ branch fix/keep-host-models-when-gpus-pinned  onto base
 # The temporal decode carries its own VRAM fixes: the VAE stays resident where the
 # card can spare it, and under clear_vram_after_sampling the workers release it
 # after the decode instead of keeping the copy the decode reloaded.
-# Cancel and progress for the decode need ray_worker_vae.py, which only exists
-# here, so they sit on it rather than with the sampler's. The progress bar reports
+# The temporal decode has no dependency of its own, but the decode's cancel needs
+# both its chunk loop and the cancel machinery (progress.request_cancel,
+# retire_actors, _drain) from fix/worker-failure-and-cancel, and a branch has one
+# base - so the temporal decode sits on the cancel branch to keep the chain linear.
+# Cancel and progress for the decode then sit on the temporal decode. The progress bar reports
 # through the cancel path's polling wait and counts its chunk loop; it adds
 # raylight/decode_progress.py and, like the cancel with progress.py, relies on the
 # assembly for a module its own base lacks.
-branch feat/vae-temporal-chunk-decode         onto base
+branch feat/vae-temporal-chunk-decode         onto fix/worker-failure-and-cancel
 branch feat/decode-cancel-and-progress        onto feat/vae-temporal-chunk-decode
 # feat/decode-pacer and feat/vae-decode-controls are out of the build, like
 # tooling/fsdp-probes and tooling/crash-trace. They exist to investigate the
