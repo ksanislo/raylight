@@ -1666,6 +1666,23 @@ def make_ray_actor_fn(world_size, parallel_dict):
     num_replicas = parallel_dict.get("dp_degree", 1)
     shard_size = parallel_dict.get("shard_size", world_size)
     use_group_process_group = bool(parallel_dict.get("use_group_process_group"))
+    # With num_gpus=1 Ray picks the card and overwrites CUDA_VISIBLE_DEVICES, so rank
+    # order and PCI order need not agree. The collective groups are built from rank
+    # order, so on a multi socket box that decides whether an all-to-all stays on one
+    # node or crosses the interconnect. Claiming no GPU and naming the device instead
+    # makes rank i land on gpu_pin_order[i].
+    gpu_pin_order = parallel_dict.get("gpu_pin_order")
+
+    def _actor_options(rank, name):
+        options = {"name": name}
+        if gpu_pin_order:
+            options["num_gpus"] = 0
+            options["runtime_env"] = {
+                "env_vars": {"CUDA_VISIBLE_DEVICES": str(gpu_pin_order[rank % len(gpu_pin_order)])}
+            }
+        else:
+            options["num_gpus"] = 1
+        return options
 
     def _init_ray_actor(world_size=world_size, parallel_dict=parallel_dict):
         gpu_actor = ray.remote(RayWorker)
@@ -1675,7 +1692,7 @@ def make_ray_actor_fn(world_size, parallel_dict):
         if num_replicas <= 1 or not use_group_process_group:
             # XDiT DP stays in one global group; xFuser derives DP ranks internally.
             for local_rank in range(world_size):
-                worker_specs.append((local_rank, f"RayWorker:{local_rank}", parallel_dict))
+                worker_specs.append((local_rank, local_rank, f"RayWorker:{local_rank}", parallel_dict))
         else:
             # FSDP multi-replica DP uses one NCCL group per replica.
             for group_id in range(num_replicas):
@@ -1684,11 +1701,12 @@ def make_ray_actor_fn(world_size, parallel_dict):
                 group_parallel_dict["use_group_process_group"] = True
 
                 for local_rank in range(shard_size):
-                    worker_specs.append((local_rank, f"RayWorker:{group_id}_{local_rank}", group_parallel_dict))
+                    worker_specs.append((local_rank, group_id * shard_size + local_rank,
+                                         f"RayWorker:{group_id}_{local_rank}", group_parallel_dict))
 
         try:
-            for local_rank, name, worker_parallel_dict in worker_specs:
-                gpu_actors.append(gpu_actor.options(num_gpus=1, name=name).remote(
+            for local_rank, rank, name, worker_parallel_dict in worker_specs:
+                gpu_actors.append(gpu_actor.options(**_actor_options(rank, name)).remote(
                     local_rank=local_rank, device_id=0, parallel_dict=worker_parallel_dict))
             ray.get([actor.__ray_ready__.remote() for actor in gpu_actors], timeout=120)
             worker_processes = ray.get([
@@ -1699,7 +1717,7 @@ def make_ray_actor_fn(world_size, parallel_dict):
             for actor in gpu_actors:
                 ray.kill(actor, no_restart=True)
             raise
-        _note_workers_spawned(name for _, name, _ in worker_specs)
+        _note_workers_spawned(name for _, _, name, _ in worker_specs)
         return {"workers": gpu_actors, "worker_processes": worker_processes}
 
     return _init_ray_actor
