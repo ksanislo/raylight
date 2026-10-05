@@ -146,6 +146,10 @@ branch feat/ray-audio-decode                  onto feat/decode-progress
 # replaces the chunk loop's body, which feat/decode-progress owns, so it sits on
 # that branch and assembles after both decode progress branches.
 branch feat/fsdp-vae-decode                   onto feat/decode-progress
+# RayVAELoader's second output: the same VAE for host nodes, read from disk only
+# on first use, so a graph needs one loader for the worker decode and any host
+# encode. Edits the loader as the sharding branch leaves it, so it sits on that.
+branch feat/ray-vae-loader-host-vae           onto feat/fsdp-vae-decode
 # Workers never ran ComfyUI's reset_cast_buffers, so a streamed VAE stayed pinned
 # after the worker dropped it.
 branch fix/worker-reset-cast-buffers          onto base
@@ -183,4 +187,4 @@ branch tooling/stack                          onto base
 # the saved workflows in ComfyUI/user/default/workflows were built against.
 # verify-restack.sh checks that order explicitly - do not reorder these two
 # without re-running it.
-assemble tooling/stack fix/xfuser-version-bound fix/dead-actor-recovery fix/ring-attention-lse-padding fix/worker-nvrtc-library-path fix/parallel-quant-shard-load fix/forward-fast-disk-to-workers fix/sampler-progress fix/worker-vram-release-on-failure fix/sampler-cancel fix/offload-quantized-fsdp-shards fix/free-host-vram-before-shard-load fix/keep-host-models-when-gpus-pinned feat/vae-temporal-chunk-decode fix/decode-cancel fix/mlp-chunk feat/minimax-h3-fp16 feat/minimax-h3-fp16-node-inputs feat/numa-aware-worker-placement feat/lora-bypass-operand-placement feat/rank-gpu-pinning fix/ray-kill-without-model-load fix/worker-pinned-memory-selectable feat/worker-vram-tunables-in-workflow feat/initializer-input-ux fix/ck-patch-scope-nesting feat/fsdp-text-encoder fix/quant-loader-requires-grad feat/minimax-h3-fun-controlnet feat/ck-int8-attention fix/minimax-local-embed-and-head fix/lora-bypass-in-place fix/dead-worker-handling feat/collective-timeout-option feat/decode-progress feat/ray-audio-decode feat/fsdp-vae-decode fix/worker-reset-cast-buffers fix/offload-dit-while-encoding fix/fsdp-full-load-keeps-cpu-offload
+assemble tooling/stack fix/xfuser-version-bound fix/dead-actor-recovery fix/ring-attention-lse-padding fix/worker-nvrtc-library-path fix/parallel-quant-shard-load fix/forward-fast-disk-to-workers fix/sampler-progress fix/worker-vram-release-on-failure fix/sampler-cancel fix/offload-quantized-fsdp-shards fix/free-host-vram-before-shard-load fix/keep-host-models-when-gpus-pinned feat/vae-temporal-chunk-decode fix/decode-cancel fix/mlp-chunk feat/minimax-h3-fp16 feat/minimax-h3-fp16-node-inputs feat/numa-aware-worker-placement feat/lora-bypass-operand-placement feat/rank-gpu-pinning fix/ray-kill-without-model-load fix/worker-pinned-memory-selectable feat/worker-vram-tunables-in-workflow feat/initializer-input-ux fix/ck-patch-scope-nesting feat/fsdp-text-encoder fix/quant-loader-requires-grad feat/minimax-h3-fun-controlnet feat/ck-int8-attention fix/minimax-local-embed-and-head fix/lora-bypass-in-place fix/dead-worker-handling feat/collective-timeout-option feat/decode-progress feat/ray-audio-decode feat/fsdp-vae-decode feat/ray-vae-loader-host-vae fix/worker-reset-cast-buffers fix/offload-dit-while-encoding fix/fsdp-full-load-keeps-cpu-offload
