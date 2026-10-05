@@ -1799,7 +1799,12 @@ def _ray_get_cancellable(futures, ray_actors=None):
         #and ending a worker that was merely busy costs a cold respawn for
         #nothing. It is only spent while nothing has answered at all.
         from raylight.comfy_extra_dist.nodes_custom_sampler import _drain
-        stuck = _drain(waiting, 0.0)
+        try:
+            stuck = _drain(waiting, 0.0)
+        finally:
+            #A sampling worker clears the flag as it stops; nothing in a decode
+            #does. Left behind, it ends every later decode at its first chunk.
+            progress.clear()
         if stuck and ray_actors is not None:
             retire_actors(ray_actors, "%d worker(s) that did not answer a cancel"
                           % len(stuck))
