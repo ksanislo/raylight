@@ -518,25 +518,32 @@ class RayModelComputeDtype:
         return m
 
 
+_ATTENTION_OFF = "off (initializer kernel)"
+_ATTENTION_CK_INT8 = "comfy kitchen int8"
+
+
 class RayModelAttentionBackend:
     @classmethod
     def INPUT_TYPES(s):
-        backends = ["pytorch attention"]
+        backends = [_ATTENTION_OFF]
         if int8_attention_is_available():
-            backends.append("comfy kitchen attention")
+            backends.append(_ATTENTION_CK_INT8)
         return {
             "required": {
                 "ray_actors": ("RAY_ACTORS",),
                 "attention": (backends, {
-                    "default": "pytorch attention",
-                    "tooltip": "Attention used inside Ulysses. Comfy Kitchen attention is INT8; with "
-                               "ring_degree above 1 it needs a Comfy Kitchen build that has "
-                               "int8_attention_with_lse.",
+                    "default": _ATTENTION_OFF,
+                    "tooltip": "Kernel used inside Ulysses and ring attention. Off runs the "
+                               "XFuser_attention kernel chosen on the initializer. Comfy Kitchen INT8 "
+                               "replaces it and falls back to it for the opening dense steps and for "
+                               "any call INT8 cannot take; with ring_degree above 1 it needs a Comfy "
+                               "Kitchen build that has int8_attention_with_lse.",
                 }),
                 "dense_first_steps": ("INT", {
                     "default": 0, "min": 0, "max": 10000,
-                    "tooltip": "Run this many opening steps on dense attention before switching to "
-                               "Comfy Kitchen. The high-noise steps set composition and prompt adherence.",
+                    "tooltip": "Run this many opening steps on the initializer's kernel before "
+                               "switching to Comfy Kitchen. The high-noise steps set composition and "
+                               "prompt adherence.",
                 }),
             }
         }
@@ -552,10 +559,13 @@ class RayModelAttentionBackend:
 
     @ray_patch
     def patch(self, model, attention, dense_first_steps):
-        if attention == "comfy kitchen attention":
+        if attention == _ATTENTION_CK_INT8:
             return set_inner_attention(model, create_inner_attention(
                 "raylight:comfy_kitchen_int8", dense_first_steps=dense_first_steps))
-        return clear_inner_attention(model, ComfyKitchenInt8Attention)
+        if attention == _ATTENTION_OFF:
+            return clear_inner_attention(model, ComfyKitchenInt8Attention)
+        raise ValueError(f"Unknown attention {attention!r}; expected {_ATTENTION_OFF!r} "
+                         f"or {_ATTENTION_CK_INT8!r}.")
 
 
 NODE_CLASS_MAPPINGS = {
@@ -583,5 +593,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RayModelSamplingFlux": "ModelSamplingFlux (Ray)",
     "RayRescaleCFG": "RescaleCFG (Ray)",
     "RayModelComputeDtype": "ModelComputeDtype (Ray)",
-    "RayModelAttentionBackend": "Model Attention Backend (Ray)",
+    "RayModelAttentionBackend": "Comfy Kitchen Attention (Ray)",
 }
