@@ -3,6 +3,9 @@ import logging
 
 import torch
 
+import comfy.model_management as comfy_model_management
+from raylight import progress
+
 
 def load_vae_model(vae_path):
     import comfy.sd as comfy_sd
@@ -249,6 +252,12 @@ def ray_vae_decode_temporal_partial_impl(worker, samples, job_rank=0, job_world_
             for chunk_index in range(num_chunks):
                 if chunk_index % job_world_size != job_rank:
                     continue
+                #One cancel check per chunk - at most a small board call, usually a cached
+                #answer - against a chunk that takes far longer to decode.
+                #Without it a cancel is not noticed until the whole decode is over,
+                #which for a long clip is most of what there was to cancel.
+                if progress.cancel_requested():
+                    raise comfy_model_management.InterruptProcessingException()
                 t_start_idx = chunk_index * model.tokens_chunk_size
                 t_end_idx = t_start_idx + model.tokens_chunk_size + model.token_overlap
                 clip_dec = model._adaptive_decode(z[:, :, t_start_idx:t_end_idx, :, :])
