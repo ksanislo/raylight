@@ -158,6 +158,19 @@ branch feat/ray-audio-decode                  onto fix/free-vae-after-decode
 branch feat/decode-progress                   onto fix/decode-cancel
 branch feat/audio-decode-progress             onto feat/ray-audio-decode
 
+# -- VRAM and memory fixes found on long clips -------------------------------
+# Sharding the decoder's weights across the ranks, opt-in per RayVAELoader. It
+# replaces the chunk loop's body, which feat/decode-progress owns, so it sits on
+# that branch and assembles after both decode progress branches.
+branch feat/fsdp-vae-decode                   onto feat/decode-progress
+# Workers never ran ComfyUI's reset_cast_buffers, so a streamed VAE stayed pinned
+# after the worker dropped it.
+branch fix/worker-reset-cast-buffers          onto base
+# Moves the DiT off the cards while the text encoder runs; needs the per-rank
+# encoder preparation, so it chains onto that branch.
+branch fix/offload-dit-while-encoding         onto fix/prepare-encoder-on-every-rank
+# FSDPModelPatcher.load(full_load=True) moved CPU-offloaded shards onto the card.
+branch fix/fsdp-full-load-keeps-cpu-offload   onto base
 # tooling/crash-trace is NOT declared as a PR branch and is NOT in the build. Its
 # markers sit in code owned by two different feature branches (encode_tokens from
 # feat/fsdp-text-encoder, the decode path from feat/vae-temporal-chunk-decode), so it
@@ -187,4 +200,4 @@ branch tooling/stack                          onto base
 # the saved workflows in ComfyUI/user/default/workflows were built against.
 # verify-restack.sh checks that order explicitly - do not reorder these two
 # without re-running it.
-assemble tooling/stack fix/xfuser-version-bound fix/dead-actor-recovery fix/ring-attention-lse-padding fix/worker-nvrtc-library-path fix/parallel-quant-shard-load fix/forward-fast-disk-to-workers fix/sampler-progress fix/worker-vram-release-on-failure fix/sampler-cancel fix/offload-quantized-fsdp-shards fix/free-host-vram-before-shard-load fix/keep-host-models-when-gpus-pinned feat/vae-temporal-chunk-decode fix/decode-cancel fix/vae-decode-vram-reserve fix/mlp-chunk feat/minimax-h3-fp16 feat/minimax-h3-fp16-node-inputs feat/numa-aware-worker-placement feat/lora-bypass-operand-placement feat/rank-gpu-pinning fix/ray-kill-without-model-load fix/worker-pinned-memory-selectable feat/worker-vram-tunables-in-workflow feat/initializer-input-ux fix/ck-patch-scope-nesting feat/fsdp-text-encoder fix/quant-loader-requires-grad feat/minimax-h3-fun-controlnet fix/control-patch-full-sequence feat/ck-int8-attention fix/minimax-local-embed-and-head fix/offload-encoder-while-sampling fix/prepare-encoder-on-every-rank fix/lora-bypass-in-place fix/fail-job-on-dead-worker fix/reinit-after-workers-die feat/collective-timeout-option feat/minimax-h3-fp16-stock-comfy feat/minimax-h3-fp16-native fix/free-vae-after-decode feat/free-vram-wording feat/ray-audio-decode feat/decode-progress feat/audio-decode-progress
+assemble tooling/stack fix/xfuser-version-bound fix/dead-actor-recovery fix/ring-attention-lse-padding fix/worker-nvrtc-library-path fix/parallel-quant-shard-load fix/forward-fast-disk-to-workers fix/sampler-progress fix/worker-vram-release-on-failure fix/sampler-cancel fix/offload-quantized-fsdp-shards fix/free-host-vram-before-shard-load fix/keep-host-models-when-gpus-pinned feat/vae-temporal-chunk-decode fix/decode-cancel fix/vae-decode-vram-reserve fix/mlp-chunk feat/minimax-h3-fp16 feat/minimax-h3-fp16-node-inputs feat/numa-aware-worker-placement feat/lora-bypass-operand-placement feat/rank-gpu-pinning fix/ray-kill-without-model-load fix/worker-pinned-memory-selectable feat/worker-vram-tunables-in-workflow feat/initializer-input-ux fix/ck-patch-scope-nesting feat/fsdp-text-encoder fix/quant-loader-requires-grad feat/minimax-h3-fun-controlnet fix/control-patch-full-sequence feat/ck-int8-attention fix/minimax-local-embed-and-head fix/offload-encoder-while-sampling fix/prepare-encoder-on-every-rank fix/lora-bypass-in-place fix/fail-job-on-dead-worker fix/reinit-after-workers-die feat/collective-timeout-option feat/minimax-h3-fp16-stock-comfy feat/minimax-h3-fp16-native fix/free-vae-after-decode feat/free-vram-wording feat/ray-audio-decode feat/decode-progress feat/audio-decode-progress feat/fsdp-vae-decode fix/worker-reset-cast-buffers fix/offload-dit-while-encoding fix/fsdp-full-load-keeps-cpu-offload
