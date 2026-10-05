@@ -89,12 +89,12 @@ branch feat/decode-cancel-and-progress        onto feat/vae-temporal-chunk-decod
 branch feat/minimax-h3-fun-controlnet          onto base
 
 # -- features, all off by default --------------------------------------------
-# fix/mlp-chunk owns the _mlp_branch extraction so the single pass and the per
+# feat/mlp-chunk owns the _mlp_branch extraction so the single pass and the per
 # chunk path share one implementation. fp16 narrows that helper on its own
 # terms, so the fp16-aware signature is a merge resolution here rather than a
 # commit that belongs to neither branch.
-branch fix/mlp-chunk                          onto base
-# RESOLUTION NOTE: fix/mlp-chunk and feat/minimax-h3-fp16 each add
+branch feat/mlp-chunk                          onto base
+# RESOLUTION NOTE: feat/mlp-chunk and feat/minimax-h3-fp16 each add
 # `import os as _os` inside the MiniMax injector in usp.py, because each needs it
 # on its own. Assembling both leaves the import twice - harmless, Python caches
 # the module, but drop one when resolving the fp16 conflict. The two injection
@@ -110,10 +110,13 @@ branch feat/numa-aware-worker-placement       onto base
 # Memory for the LoRA bypass: operands kept off the host (opt-in), and the deltas
 # added into the layer output in place.
 branch feat/lora-bypass-memory                onto base
+# ray.shutdown() returns before the old workers have released their GPUs; the
+# initializer waits for them before spawning the next set.
+branch fix/wait-for-workers-to-exit           onto base
 branch feat/rank-gpu-pinning                  onto base
 branch fix/ck-patch-scope-nesting             onto base
 branch fix/quant-loader-requires-grad        onto base
-branch fix/ray-kill-without-model-load        onto base
+branch feat/ray-kill-init                    onto base
 branch fix/worker-pinned-memory-selectable    onto base
 branch feat/worker-vram-tunables-in-workflow  onto base
 # Grouping and labels, including clear_vram_after_sampling shown as "Free VRAM"
@@ -186,4 +189,4 @@ branch tooling/stack                          onto base
 # the saved workflows in ComfyUI/user/default/workflows were built against.
 # verify-restack.sh checks that order explicitly - do not reorder these two
 # without re-running it.
-assemble tooling/stack fix/xfuser-version-bound fix/dead-actor-recovery fix/ring-attention-lse-padding fix/worker-nvrtc-library-path fix/parallel-quant-shard-load fix/forward-fast-disk-to-workers fix/sampler-progress fix/worker-failure-and-cancel fix/offload-quantized-fsdp-shards fix/free-host-vram-before-shard-load fix/keep-host-models-when-gpus-pinned feat/vae-temporal-chunk-decode feat/decode-cancel-and-progress fix/mlp-chunk feat/minimax-h3-fp16 feat/minimax-h3-fp16-node-inputs feat/numa-aware-worker-placement feat/lora-bypass-memory feat/rank-gpu-pinning fix/ray-kill-without-model-load fix/worker-pinned-memory-selectable feat/worker-vram-tunables-in-workflow feat/initializer-input-ux fix/ck-patch-scope-nesting feat/fsdp-text-encoder fix/quant-loader-requires-grad feat/minimax-h3-fun-controlnet feat/ck-int8-attention fix/minimax-local-embed-and-head feat/collective-timeout-option feat/ray-audio-decode feat/single-vae-loader feat/fsdp-vae-decode fix/worker-reset-cast-buffers fix/offload-dit-while-encoding fix/fsdp-full-load-keeps-cpu-offload
+assemble tooling/stack fix/xfuser-version-bound fix/dead-actor-recovery fix/ring-attention-lse-padding fix/worker-nvrtc-library-path fix/parallel-quant-shard-load fix/forward-fast-disk-to-workers fix/sampler-progress fix/worker-failure-and-cancel fix/offload-quantized-fsdp-shards fix/free-host-vram-before-shard-load fix/keep-host-models-when-gpus-pinned feat/vae-temporal-chunk-decode feat/decode-cancel-and-progress feat/mlp-chunk feat/minimax-h3-fp16 feat/minimax-h3-fp16-node-inputs feat/numa-aware-worker-placement feat/lora-bypass-memory fix/wait-for-workers-to-exit feat/rank-gpu-pinning feat/ray-kill-init fix/worker-pinned-memory-selectable feat/worker-vram-tunables-in-workflow feat/initializer-input-ux fix/ck-patch-scope-nesting feat/fsdp-text-encoder fix/quant-loader-requires-grad feat/minimax-h3-fun-controlnet feat/ck-int8-attention fix/minimax-local-embed-and-head feat/collective-timeout-option feat/ray-audio-decode feat/single-vae-loader feat/fsdp-vae-decode fix/worker-reset-cast-buffers fix/offload-dit-while-encoding fix/fsdp-full-load-keeps-cpu-offload
