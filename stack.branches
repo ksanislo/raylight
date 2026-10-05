@@ -43,10 +43,12 @@ branch fix/parallel-quant-shard-load          onto base
 branch fix/forward-fast-disk-to-workers       onto base
 
 # -- VRAM lifecycle (a real chain: cancel needs the progress plumbing) --------
-# fix/sampler-progress adds _gather_with_progress, which the VRAM release path
-# and then the cancel path both build on.
+# fix/sampler-progress adds _gather_with_progress, which the failure and cancel
+# handling builds on. That branch covers a run that goes wrong: VRAM released and
+# workers respawned after a failed sample, a cancel that stops the workers with a
+# sized wait, and a dead worker failing the job and re-running the initializer.
 branch fix/sampler-progress                   onto base
-branch fix/worker-vram-release-on-failure     onto fix/sampler-progress
+branch fix/worker-failure-and-cancel          onto fix/sampler-progress
 
 # The text encoder reports progress and answers a cancel through the machinery
 # fix/sampler-progress adds, so it chains onto it rather than onto base. File
@@ -54,7 +56,6 @@ branch fix/worker-vram-release-on-failure     onto fix/sampler-progress
 # moving the encoder off the card while sampling, and loading it on every rank
 # before the encode starts.
 branch feat/fsdp-text-encoder                 onto fix/sampler-progress
-branch fix/sampler-cancel                     onto fix/worker-vram-release-on-failure
 branch fix/offload-quantized-fsdp-shards      onto base
 branch fix/free-host-vram-before-shard-load   onto base
 branch fix/keep-host-models-when-gpus-pinned  onto base
@@ -63,10 +64,13 @@ branch fix/keep-host-models-when-gpus-pinned  onto base
 # The temporal decode carries its own VRAM fixes: the VAE stays resident where the
 # card can spare it, and under clear_vram_after_sampling the workers release it
 # after the decode instead of keeping the copy the decode reloaded.
-# The decode cancel checkpoint needs ray_worker_vae.py, which only exists here.
-# That is why cancellation is two branches, not one.
+# Cancel and progress for the decode need ray_worker_vae.py, which only exists
+# here, so they sit on it rather than with the sampler's. The progress bar reports
+# through the cancel path's polling wait and counts its chunk loop; it adds
+# raylight/decode_progress.py and, like the cancel with progress.py, relies on the
+# assembly for a module its own base lacks.
 branch feat/vae-temporal-chunk-decode         onto base
-branch fix/decode-cancel                      onto feat/vae-temporal-chunk-decode
+branch feat/decode-cancel-and-progress        onto feat/vae-temporal-chunk-decode
 # feat/decode-pacer and feat/vae-decode-controls are out of the build, like
 # tooling/fsdp-probes and tooling/crash-trace. They exist to investigate the
 # host-heavy decode phase - the pacer spaces out when each card enters it, the
@@ -100,7 +104,9 @@ branch fix/mlp-chunk                          onto base
 branch feat/minimax-h3-fp16                   onto base
 branch feat/minimax-h3-fp16-node-inputs       onto feat/minimax-h3-fp16
 branch feat/numa-aware-worker-placement       onto base
-branch feat/lora-bypass-operand-placement     onto base
+# Memory for the LoRA bypass: operands kept off the host (opt-in), and the deltas
+# added into the layer output in place.
+branch feat/lora-bypass-memory                onto base
 branch feat/rank-gpu-pinning                  onto base
 branch fix/ck-patch-scope-nesting             onto base
 branch fix/quant-loader-requires-grad        onto base
@@ -120,32 +126,21 @@ branch feat/ck-int8-attention                 onto base
 # head's outputs. Touches xdit_context_parallel.py, which the fp16, control-patch
 # and ck branches also reshape, so it assembles after all of them.
 branch fix/minimax-local-embed-and-head       onto base
-# Holds operands through _bypass_operands, which the placement branch adds.
-branch fix/lora-bypass-in-place               onto feat/lora-bypass-operand-placement
-# A worker dying mid-run: fail the job instead of waiting on the rest, and re-run
-# the initializer when its workers are gone. Builds on the cancel path: its drain
-# timing, retire_actors, actor_generation.
-branch fix/dead-worker-handling               onto fix/sampler-cancel
 # Another RayWorkerOptions knob. Its input is appended last, so it assembles last.
 branch feat/collective-timeout-option         onto base
 
-# -- progress for the decodes, and the audio decode ----------------------------
-# The decodes ran with nothing on screen. The video one sits on decode-cancel,
-# whose polling wait it reports through and whose chunk loop it counts; it adds
-# raylight/decode_progress.py (and, like decode-cancel with progress.py, relies on
-# the assembly for a module its own base lacks).
-branch feat/decode-progress                   onto fix/decode-cancel
+# -- the audio decode -----------------------------------------------------------
 # The audio decode on a worker, so its VAE is released under Free VRAM too, with
 # its progress bar counted through decode_progress.py - hence onto the video
 # progress branch. One worker, deliberately: splitting it across workers measured
 # ~-74 dB off bit-identical with no real speed to gain.
-branch feat/ray-audio-decode                  onto feat/decode-progress
+branch feat/ray-audio-decode                  onto feat/decode-cancel-and-progress
 
 # -- VRAM and memory fixes found on long clips -------------------------------
 # Sharding the decoder's weights across the ranks, opt-in per RayVAELoader. It
-# replaces the chunk loop's body, which feat/decode-progress owns, so it sits on
-# that branch and assembles after both decode progress branches.
-branch feat/fsdp-vae-decode                   onto feat/decode-progress
+# replaces the chunk loop's body, which feat/decode-cancel-and-progress owns, so it
+# sits on that branch and assembles after the audio decode.
+branch feat/fsdp-vae-decode                   onto feat/decode-cancel-and-progress
 # RayVAELoader's second output: the same VAE for host nodes, read from disk only
 # on first use, so a graph needs one loader for the worker decode and any host
 # encode. Edits the loader as the sharding branch leaves it, so it sits on that.
@@ -187,4 +182,4 @@ branch tooling/stack                          onto base
 # the saved workflows in ComfyUI/user/default/workflows were built against.
 # verify-restack.sh checks that order explicitly - do not reorder these two
 # without re-running it.
-assemble tooling/stack fix/xfuser-version-bound fix/dead-actor-recovery fix/ring-attention-lse-padding fix/worker-nvrtc-library-path fix/parallel-quant-shard-load fix/forward-fast-disk-to-workers fix/sampler-progress fix/worker-vram-release-on-failure fix/sampler-cancel fix/offload-quantized-fsdp-shards fix/free-host-vram-before-shard-load fix/keep-host-models-when-gpus-pinned feat/vae-temporal-chunk-decode fix/decode-cancel fix/mlp-chunk feat/minimax-h3-fp16 feat/minimax-h3-fp16-node-inputs feat/numa-aware-worker-placement feat/lora-bypass-operand-placement feat/rank-gpu-pinning fix/ray-kill-without-model-load fix/worker-pinned-memory-selectable feat/worker-vram-tunables-in-workflow feat/initializer-input-ux fix/ck-patch-scope-nesting feat/fsdp-text-encoder fix/quant-loader-requires-grad feat/minimax-h3-fun-controlnet feat/ck-int8-attention fix/minimax-local-embed-and-head fix/lora-bypass-in-place fix/dead-worker-handling feat/collective-timeout-option feat/decode-progress feat/ray-audio-decode feat/fsdp-vae-decode feat/ray-vae-loader-host-vae fix/worker-reset-cast-buffers fix/offload-dit-while-encoding fix/fsdp-full-load-keeps-cpu-offload
+assemble tooling/stack fix/xfuser-version-bound fix/dead-actor-recovery fix/ring-attention-lse-padding fix/worker-nvrtc-library-path fix/parallel-quant-shard-load fix/forward-fast-disk-to-workers fix/sampler-progress fix/worker-failure-and-cancel fix/offload-quantized-fsdp-shards fix/free-host-vram-before-shard-load fix/keep-host-models-when-gpus-pinned feat/vae-temporal-chunk-decode feat/decode-cancel-and-progress fix/mlp-chunk feat/minimax-h3-fp16 feat/minimax-h3-fp16-node-inputs feat/numa-aware-worker-placement feat/lora-bypass-memory feat/rank-gpu-pinning fix/ray-kill-without-model-load fix/worker-pinned-memory-selectable feat/worker-vram-tunables-in-workflow feat/initializer-input-ux fix/ck-patch-scope-nesting feat/fsdp-text-encoder fix/quant-loader-requires-grad feat/minimax-h3-fun-controlnet feat/ck-int8-attention fix/minimax-local-embed-and-head feat/collective-timeout-option feat/ray-audio-decode feat/fsdp-vae-decode feat/ray-vae-loader-host-vae fix/worker-reset-cast-buffers fix/offload-dit-while-encoding fix/fsdp-full-load-keeps-cpu-offload
