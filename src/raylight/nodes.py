@@ -268,7 +268,6 @@ def _apply_worker_options(env_vars, options):
         env_vars[name] = value
         logging.info("[Raylight] worker option %s=%s", name, value)
 
-
 def _worker_cli_args_env_json() -> str:
     worker_cli_args = {
         # Ray workers hit cudaHostRegister failures on large LTXV loads often enough
@@ -607,6 +606,7 @@ class RayInitializer:
         ray_dashboard_address: str = "None",
         torch_dist_address: str = "None",
         worker_options=None,
+        pin_ranks_to_gpus: bool = False,
     ):
         # THIS IS PYTORCH DIST ADDRESS
         # (TODO) Change so it can be use in cluster of nodes. but it is long waaaaay down in the priority list
@@ -668,6 +668,15 @@ class RayInitializer:
         self.parallel_dict["pp_degree"] = 1
         self.parallel_dict["dp_degree"] = dp_degree if dp_degree >= 1 else 1
         self.parallel_dict["clear_vram_after_sampling"] = clear_vram_after_sampling
+        if pin_ranks_to_gpus:
+            if not selected_gpus:
+                raise ValueError("pin_ranks_to_gpus needs GPU_SELECT to list the GPUs to use, e.g. 0,1,2,3")
+            if len(selected_gpus) < world_size:
+                raise ValueError(
+                    f"pin_ranks_to_gpus needs at least {world_size} GPU indices, got {len(selected_gpus)}"
+                )
+            self.parallel_dict["gpu_pin_order"] = list(selected_gpus)
+            logging.info("[Raylight] pinning rank i -> GPU %s", list(selected_gpus[:world_size]))
         # Lets the sampler tell whether workers can reach the host's card.
         self.parallel_dict["selected_gpus"] = list(selected_gpus) if selected_gpus else None
         _reset_pipefusion_runtime_config(self.parallel_dict)
@@ -809,6 +818,13 @@ class RayInitializerAdvanced(RayInitializer):
                     {
                         "default": "",
                         "tooltip": "GPU indices for Ray workers. Use comma separated values like 0,1,2 to limit Ray to those GPUs, or leave empty to use all visible GPUs. Useful if you want to reserve GPU 0 for CLIP or VAE.",
+                    },
+                ),
+                "pin_ranks_to_gpus": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Give rank i the i-th GPU listed in GPU indices instead of letting Ray choose. Collective groups are built from rank order, so on a multi socket box this decides whether an all-to-all stays on one node. Needs GPU indices to be set.",
                     },
                 ),
                 "ulysses_degree": (
