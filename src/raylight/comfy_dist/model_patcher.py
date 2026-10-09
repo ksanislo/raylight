@@ -452,6 +452,15 @@ class FSDPModelPatcher(comfy.model_patcher.ModelPatcher):
     def is_dynamic(self):
         return True
 
+    # ComfyUI's pin eviction calls these on every loaded dynamic model, with the
+    # subsets argument ModelPatcher's own versions do not take. FSDP shards are
+    # not pinned through that bookkeeping, so there is nothing to give back.
+    def partially_unload_ram(self, ram_to_unload, subsets=None):
+        return 0
+
+    def unregister_inactive_pins(self, ram_to_unload, subsets=None):
+        return 0
+
     def model_size(self):
         if self.size > 0:
             return self.size

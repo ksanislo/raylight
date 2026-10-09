@@ -61,3 +61,14 @@ def test_a_loaded_fsdp_model_does_not_stop_the_release(streamed_module, monkeypa
     assert _forget(streamed_module)
     assert mm.STREAM_AIMDO_CAST_BUFFERS == {}
     assert mm.LARGEST_AIMDO_CASTED_WEIGHT == (None, 0)
+
+
+def test_pin_eviction_on_an_fsdp_patcher_frees_nothing():
+    # ComfyUI passes subsets; a wrapped text encoder carries dynamic_pins, so
+    # reset_cast_buffers reaches these calls
+    from raylight.comfy_dist.model_patcher import FSDPModelPatcher
+
+    patcher = FSDPModelPatcher.__new__(FSDPModelPatcher)
+
+    assert patcher.partially_unload_ram(1e30, subsets=["patches", "patches-loaded"]) == 0
+    assert patcher.unregister_inactive_pins(1e30, subsets=["weights"]) == 0
