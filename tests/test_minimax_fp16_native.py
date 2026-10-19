@@ -61,7 +61,7 @@ def _inject(native, monkeypatch):
     monkeypatch.setattr(fp16_support, "comfyui_handles_fp16", lambda: native)
     monkeypatch.setenv("RAYLIGHT_FP32_RESIDUAL", "1")
     monkeypatch.setenv("RAYLIGHT_MLP_FP16", "1")
-    blocks = [types.SimpleNamespace(attn=types.SimpleNamespace(), mlp=types.SimpleNamespace(), forward="comfyui")
+    blocks = [types.SimpleNamespace(attn=types.SimpleNamespace(modules=lambda: ()), mlp=types.SimpleNamespace(), forward="comfyui")
               for _ in range(2)]
     diffusion_model = types.SimpleNamespace(blocks=blocks, token_refiner=types.SimpleNamespace(blocks=[]))
     base_model = types.SimpleNamespace(diffusion_model=diffusion_model, extra_conds="comfyui",
