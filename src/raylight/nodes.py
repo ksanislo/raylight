@@ -1880,9 +1880,10 @@ def _ray_get_cancellable(futures, ray_actors=None, report=False):
         try:
             stuck = _drain(waiting, 0.0)
         finally:
-            #A sampling worker clears the flag as it stops; nothing in a decode
-            #does. Left behind, it ends every later decode at its first chunk.
-            progress.clear()
+            #Nothing in a decode takes the request back, and worker cleanup leaves
+            #it standing on purpose. Left behind, it ends every later decode at its
+            #first chunk.
+            progress.reset_cancel()
         if stuck and ray_actors is not None:
             retire_actors(ray_actors, "%d worker(s) that did not answer a cancel"
                           % len(stuck))
