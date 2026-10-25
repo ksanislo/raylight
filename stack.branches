@@ -33,32 +33,25 @@ into main
 # fix/xfuser-envs-get-device-name is superseded the same way: upstream now has
 # get_device_name() at xfuser_compat.py:124. Out of the build; branch kept until
 # it is confirmed unneeded on a render.
-branch fix/xfuser-version-bound               onto base
 
 # -- plain bugs, no knobs -----------------------------------------------------
-branch fix/dead-actor-recovery                onto base
-branch fix/ring-attention-lse-padding         onto base
-branch fix/worker-nvrtc-library-path          onto base
-branch fix/parallel-quant-shard-load          onto base
-branch fix/forward-fast-disk-to-workers       onto base
 
 # -- VRAM lifecycle (a real chain: cancel needs the progress plumbing) --------
 # fix/sampler-progress adds _gather_with_progress, which the failure and cancel
 # handling builds on. That branch covers a run that goes wrong: VRAM released and
 # workers respawned after a failed sample, a cancel that stops the workers with a
 # sized wait, and a dead worker failing the job and re-running the initializer.
-branch fix/sampler-progress                   onto base
-branch fix/worker-failure-and-cancel          onto fix/sampler-progress
 
 # The text encoder reports progress and answers a cancel through the machinery
 # fix/sampler-progress adds, so it chains onto it rather than onto base. File
 # that one first if these ever go upstream. It also carries its two load fixes:
 # moving the encoder off the card while sampling, and loading it on every rank
 # before the encode starts.
-branch feat/fsdp-text-encoder                 onto fix/sampler-progress
-branch fix/offload-quantized-fsdp-shards      onto base
-branch fix/free-host-vram-before-shard-load   onto base
-branch fix/keep-host-models-when-gpus-pinned  onto base
+# 2026-10-24: upstream dev 11fe66a merged 17 of these branches at their exact tips
+# (komikndr, issue #123) - removed from the build: fix/ck-patch-scope-nesting, fix/dead-actor-recovery, fix/forward-fast-disk-to-workers, fix/free-host-vram-before-shard-load, fix/fsdp-full-load-keeps-cpu-offload, fix/keep-host-models-when-gpus-pinned, fix/minimax-local-embed-and-head, fix/offload-quantized-fsdp-shards, fix/parallel-quant-shard-load, fix/quant-loader-requires-grad, fix/ring-attention-lse-padding, fix/sampler-progress, fix/wait-for-workers-to-exit, fix/worker-failure-and-cancel, fix/worker-nvrtc-library-path, fix/worker-pinned-memory-selectable, fix/xfuser-version-bound.
+# feat/fsdp-text-encoder and feat/vae-temporal-chunk-decode sat on two of them
+# (fix/sampler-progress, fix/worker-failure-and-cancel) and now sit on base.
+branch feat/fsdp-text-encoder                 onto base
 
 # -- distributed VAE decode, and cancelling one ------------------------------
 # The temporal decode carries its own VRAM fixes: the VAE stays resident where the
@@ -72,7 +65,7 @@ branch fix/keep-host-models-when-gpus-pinned  onto base
 # through the cancel path's polling wait and counts its chunk loop; it adds
 # raylight/decode_progress.py and, like the cancel with progress.py, relies on the
 # assembly for a module its own base lacks.
-branch feat/vae-temporal-chunk-decode         onto fix/worker-failure-and-cancel
+branch feat/vae-temporal-chunk-decode         onto base
 branch feat/decode-cancel-and-progress        onto feat/vae-temporal-chunk-decode
 # feat/decode-pacer and feat/vae-decode-controls are out of the build, like
 # tooling/fsdp-probes and tooling/crash-trace. They exist to investigate the
@@ -113,12 +106,8 @@ branch feat/lora-bypass-memory                onto base
 # ray.shutdown() returns before the old workers have released their GPUs; the
 # initializer waits for the ones it spawned before spawning the next set. It edits
 # the initializer's spawn and shutdown, so it assembles last.
-branch fix/wait-for-workers-to-exit           onto base
 branch feat/rank-gpu-pinning                  onto base
-branch fix/ck-patch-scope-nesting             onto base
-branch fix/quant-loader-requires-grad        onto base
 branch feat/ray-kill-init                    onto base
-branch fix/worker-pinned-memory-selectable    onto base
 branch feat/worker-vram-tunables-in-workflow  onto base
 # Grouping and labels, including clear_vram_after_sampling shown as "Free VRAM"
 # and on by default.
@@ -132,7 +121,6 @@ branch feat/ck-int8-attention                 onto base
 # Each rank builds only its slice of the MiniMax H3 sequence and gathers only the
 # head's outputs. Touches xdit_context_parallel.py, which the fp16, control-patch
 # and ck branches also reshape, so it assembles after all of them.
-branch fix/minimax-local-embed-and-head       onto base
 # Another RayWorkerOptions knob. Its input is appended last, so it assembles last.
 branch feat/collective-timeout-option         onto base
 
@@ -163,7 +151,6 @@ branch fix/worker-reset-cast-buffers          onto feat/fsdp-text-encoder
 # encoder preparation the text encoder branch carries.
 branch fix/offload-dit-while-encoding         onto feat/fsdp-text-encoder
 # FSDPModelPatcher.load(full_load=True) moved CPU-offloaded shards onto the card.
-branch fix/fsdp-full-load-keeps-cpu-offload   onto base
 # tooling/crash-trace is NOT declared as a PR branch and is NOT in the build. Its
 # markers sit in code owned by two different feature branches (encode_tokens from
 # feat/fsdp-text-encoder, the decode path from feat/vae-temporal-chunk-decode), so it
@@ -193,4 +180,4 @@ branch tooling/stack                          onto base
 # the saved workflows in ComfyUI/user/default/workflows were built against.
 # verify-restack.sh checks that order explicitly - do not reorder these two
 # without re-running it.
-assemble tooling/stack fix/xfuser-version-bound fix/dead-actor-recovery fix/ring-attention-lse-padding fix/worker-nvrtc-library-path fix/parallel-quant-shard-load fix/forward-fast-disk-to-workers fix/sampler-progress fix/worker-failure-and-cancel fix/offload-quantized-fsdp-shards fix/free-host-vram-before-shard-load fix/keep-host-models-when-gpus-pinned feat/vae-temporal-chunk-decode feat/decode-cancel-and-progress feat/mlp-chunk feat/minimax-h3-fp16 feat/minimax-h3-fp16-node-inputs feat/numa-aware-worker-placement feat/lora-bypass-memory feat/rank-gpu-pinning feat/ray-kill-init fix/worker-pinned-memory-selectable feat/worker-vram-tunables-in-workflow feat/initializer-input-ux fix/ck-patch-scope-nesting feat/fsdp-text-encoder fix/quant-loader-requires-grad feat/minimax-h3-fun-controlnet feat/ck-int8-attention fix/minimax-local-embed-and-head feat/collective-timeout-option feat/ray-audio-decode feat/single-vae-loader feat/fsdp-vae-decode fix/worker-reset-cast-buffers fix/offload-dit-while-encoding fix/fsdp-full-load-keeps-cpu-offload fix/wait-for-workers-to-exit
+assemble tooling/stack feat/vae-temporal-chunk-decode feat/decode-cancel-and-progress feat/mlp-chunk feat/minimax-h3-fp16 feat/minimax-h3-fp16-node-inputs feat/numa-aware-worker-placement feat/lora-bypass-memory feat/rank-gpu-pinning feat/ray-kill-init feat/worker-vram-tunables-in-workflow feat/initializer-input-ux feat/fsdp-text-encoder feat/minimax-h3-fun-controlnet feat/ck-int8-attention feat/collective-timeout-option feat/ray-audio-decode feat/single-vae-loader feat/fsdp-vae-decode fix/worker-reset-cast-buffers fix/offload-dit-while-encoding
