@@ -1903,6 +1903,11 @@ class RayCLIP:
         from raylight.comfy_extra_dist.nodes_custom_sampler import _gather_with_progress
 
         workers = self.ray_actors["workers"]
+        #The encode polls the cancel flag like a sampler does, so it has to be
+        #reset before dispatch like one too. A cancelled sampler leaves it standing,
+        #and the encode runs first in the next prompt: it would stop at its first
+        #block, and the sampler that resets the flag would never be reached.
+        progress.reset_cancel()
         #Every rank loads first and all are waited for, so a slow cold read on one
         #rank cannot leave the others timing out in the encode's first all-gather.
         _gather_with_progress([actor.prepare_clip.remote(tokens) for actor in workers], self.ray_actors)
