@@ -141,6 +141,11 @@ branch feat/single-vae-loader                 onto feat/decode-cancel-and-progre
 # replaces the chunk loop's body and adds its option to the loader, so it sits on
 # the single-loader branch.
 branch feat/fsdp-vae-decode                   onto feat/single-vae-loader
+# A decode with fewer chunks than ranks - a still is always one chunk - is split by
+# rows of spatial tiles instead, so the ranks a temporal split would leave idle decode
+# too. A sharded decoder keeps the temporal path, and the check for one is the sharded
+# decode's, so it sits on that branch.
+branch feat/vae-decode-row-split              onto feat/fsdp-vae-decode
 # Workers never ran ComfyUI's reset_cast_buffers, so a streamed VAE stayed pinned
 # after the worker dropped it, and the encode's cast buffer (sized to the embedding
 # table, 1.45 GiB) stayed through sampling - the margin a 30 s clip at 1344x768
@@ -180,4 +185,4 @@ branch tooling/stack                          onto base
 # the saved workflows in ComfyUI/user/default/workflows were built against.
 # verify-restack.sh checks that order explicitly - do not reorder these two
 # without re-running it.
-assemble tooling/stack feat/vae-temporal-chunk-decode feat/decode-cancel-and-progress feat/mlp-chunk feat/minimax-h3-fp16 feat/minimax-h3-fp16-node-inputs feat/numa-aware-worker-placement feat/lora-bypass-memory feat/rank-gpu-pinning feat/ray-kill-init feat/worker-vram-tunables-in-workflow feat/initializer-input-ux feat/fsdp-text-encoder feat/minimax-h3-fun-controlnet feat/ck-int8-attention feat/collective-timeout-option feat/ray-audio-decode feat/single-vae-loader feat/fsdp-vae-decode fix/worker-reset-cast-buffers fix/offload-dit-while-encoding
+assemble tooling/stack feat/vae-temporal-chunk-decode feat/decode-cancel-and-progress feat/mlp-chunk feat/minimax-h3-fp16 feat/minimax-h3-fp16-node-inputs feat/numa-aware-worker-placement feat/lora-bypass-memory feat/rank-gpu-pinning feat/ray-kill-init feat/worker-vram-tunables-in-workflow feat/initializer-input-ux feat/fsdp-text-encoder feat/minimax-h3-fun-controlnet feat/ck-int8-attention feat/collective-timeout-option feat/ray-audio-decode feat/single-vae-loader feat/fsdp-vae-decode fix/worker-reset-cast-buffers fix/offload-dit-while-encoding feat/vae-decode-row-split
