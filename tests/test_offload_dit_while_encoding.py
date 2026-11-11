@@ -18,6 +18,7 @@ if not torch.cuda.is_available():
 import comfy.sd
 import raylight.comfy_dist.sd as dist_sd
 from raylight.distributed_worker.ray_worker import RayWorker
+from raylight.distributed_worker.raylightworker_config_schema import RayWorkerConfig
 
 
 class _Model:
@@ -47,7 +48,9 @@ def _worker(log, model="fsdp"):
     w.clip_state_dict = None
     w.device_mesh = None
     w.is_cpu_offload = False
-    w.parallel_dict = {}
+    w.is_quant = False
+    w.config = RayWorkerConfig()
+    w.overwrite_cast_dtype = None
     w.restore_clip_vram = lambda: log.append("encoder restored")
     w._free_current_clip = lambda: None
     return w
