@@ -1817,7 +1817,14 @@ class RayVAEDecodeDistributed:
             decode_mode = _gather_with_progress(
                 [gpu_actors[0].ray_vae_decode_mode.remote()], ray_actors, independent=True, progress_reader=lambda: None
             )[0]
-            if decode_mode == "native" or (decode_mode == "temporal" and samples["samples"].shape[2] == 1):
+            still = decode_mode == "temporal" and samples["samples"].shape[2] == 1
+            if still and len(gpu_actors) > 1:
+                # a still is one chunk; the stock decoder spreads its rows of tiles instead
+                still = not _gather_with_progress(
+                    [gpu_actors[0].ray_vae_decode_splits_by_rows.remote(1, len(gpu_actors))], ray_actors,
+                    independent=True, progress_reader=lambda: None,
+                )[0]
+            if decode_mode == "native" or still:
                 image = _gather_with_progress(
                     [gpu_actors[0].ray_vae_decode_native.remote(samples)], ray_actors,
                     independent=True, progress_reader=lambda: decode_progress.read(["native"]),

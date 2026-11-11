@@ -42,6 +42,7 @@ from raylight.distributed_worker.ray_worker_vae import (
     ray_vae_decode_temporal_combine_impl,
     ray_vae_decode_temporal_partial_impl,
     ray_seedvr2_vae_decode_partial_impl,
+    splits_by_rows,
     vae_decode_mode,
 )
 from raylight.distributed_worker.utils import Noise_EmptyNoise, Noise_RandomNoise, patch_ray_tqdm
@@ -1236,6 +1237,9 @@ class RayWorker:
 
     def ray_vae_decode_mode(self):
         return vae_decode_mode(self.vae_model)
+
+    def ray_vae_decode_splits_by_rows(self, latent_t, job_world_size):
+        return splits_by_rows(self.vae_model.first_stage_model, latent_t, job_world_size)
 
     @patch_ray_tqdm
     def ray_vae_decode_native(self, samples):
