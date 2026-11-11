@@ -1,3 +1,6 @@
+import contextlib
+import logging
+
 import torch
 
 import comfy.model_management as model_management
@@ -143,6 +146,57 @@ def ray_vae_decode_native_impl(worker, samples):
     return images
 
 
+#Workers run with a VRAM reserve sized for sampling, where it keeps the diffusion
+#model's shards from being pulled onto the card. It applies to a decode as well,
+#and there it does the same thing to the VAE: comfy's ops fault each weight in
+#over the bus and release it again, so the card holds a fraction of the model and
+#streams the rest for the decode's whole length. Dropping the reserve while the
+#decode runs lets the weights stay where they are, and a weight already resident
+#costs nothing to fault.
+_DECODE_VRAM_RESERVE = 0
+
+#The activation figure below is an estimate, and on a card the VAE would nearly
+#fill there is nothing to absorb one that reads low - so the cushion is sized to
+#decline those rather than to fit them.
+_DECODE_VRAM_CUSHION = 2 * 1024 * 1024 * 1024
+
+
+@contextlib.contextmanager
+def _decode_vram_reserve(vae, memory_used):
+    """Drop the worker's VRAM reserve for the decode where the card can spare it.
+
+    What matters is how much of the card is free when the decode starts, not why,
+    so the room is measured rather than inferred from the configuration, and a card
+    that does not have it keeps its reserve and streams exactly as it always has.
+    """
+    try:
+        import comfy_aimdo.control as aimdo_control
+        previous = aimdo_control.get_simple_vram_headroom()
+        required = vae.patcher.model_size() + memory_used + _DECODE_VRAM_CUSHION
+        free = model_management.get_free_memory(vae.device)
+    except Exception as exc:
+        logging.warning("[Raylight] could not size the decode, keeping the VRAM reserve: %s", exc)
+        yield
+        return
+
+    if free < required:
+        logging.info(
+            "[Raylight] decode keeps the VRAM reserve: %.1f GiB free, %.1f GiB needed to hold the VAE",
+            free / 1073741824, required / 1073741824)
+        yield
+        return
+
+    try:
+        aimdo_control.set_simple_vram_headroom(_DECODE_VRAM_RESERVE)
+        yield
+    finally:
+        #a worker left without its reserve samples without one next time
+        try:
+            aimdo_control.set_simple_vram_headroom(previous)
+        except Exception as exc:
+            logging.error("[Raylight] could not restore the VRAM reserve after decode: %s", exc)
+
+
 @torch.no_grad()
 def ray_vae_decode_temporal_partial_impl(worker, samples, job_rank=0, job_world_size=1):
     decode_progress.check_cancel(force=True)
@@ -166,9 +220,8 @@ def ray_vae_decode_temporal_partial_impl(worker, samples, job_rank=0, job_world_
     decode_progress.write(part, 0, len(chunk_indices))
     if chunk_indices:
         memory_used = vae.memory_used_decode(latent.shape, vae.vae_dtype)
-        model_management.load_models_gpu([vae.patcher], memory_required=memory_used, force_full_load=vae.disable_offload)
-
-        with model_management.cuda_device_context(vae.device):
+        with _decode_vram_reserve(vae, memory_used), model_management.cuda_device_context(vae.device):
+            model_management.load_models_gpu([vae.patcher], memory_required=memory_used, force_full_load=vae.disable_offload)
             for chunk_index in chunk_indices:
                 decode_progress.check_cancel()
                 start = chunk_index * model.tokens_chunk_size
