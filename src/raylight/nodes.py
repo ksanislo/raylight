@@ -1849,6 +1849,46 @@ class RayVAEDecodeDistributed:
             return (image,)
 
 
+class RayVAEDecodeAudio:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "ray_actors": ("RAY_ACTORS", {"tooltip": "Ray Actor to submit the model into"}),
+                "samples": ("LATENT", {"tooltip": "Latent samples to decode. A packed audio-video latent decodes its audio."}),
+                "vae_name": (folder_paths.get_filename_list("vae"), {"tooltip": "Name of the audio VAE to use for decoding."}),
+            }
+        }
+
+    RETURN_TYPES = ("AUDIO",)
+    FUNCTION = "ray_decode_audio"
+    CATEGORY = "Raylight"
+    DESCRIPTION = ("VAE Decode Audio on a Ray worker instead of the ComfyUI process, so its VAE is "
+                   "released with the workers' under Free VRAM. Decodes on the last worker, away from "
+                   "the card the ComfyUI process shares.")
+
+    def ray_decode_audio(self, ray_actors, samples, vae_name):
+        gpu_actors = ray_actors["workers"]
+        if not gpu_actors:
+            raise ValueError("VAE Decode Audio (Ray) requires at least one Ray worker.")
+        vae_path = folder_paths.get_full_path_or_raise("vae", vae_name)
+
+        # only the audio stream crosses to the worker, as VAEDecodeAudio would decode it
+        latent = samples["samples"]
+        if getattr(latent, "is_nested", False):
+            latent = latent.unbind()[-1]
+        job = {"samples": latent}
+        if "sample_rate" in samples:
+            job["sample_rate"] = samples["sample_rate"]
+
+        with _decode_session(ray_actors):
+            audio = _gather_with_progress(
+                [gpu_actors[-1].ray_audio_vae_decode.remote(vae_path, job)], ray_actors,
+                independent=True, progress_reader=lambda: decode_progress.read(["audio"]),
+            )[0]
+        return (audio,)
+
+
 class RaySeedVR2VAEDecodeDistributed:
     @classmethod
     def INPUT_TYPES(s):
@@ -1921,6 +1961,7 @@ NODE_CLASS_MAPPINGS = {
     "DPConditioningList": DPConditioningList,
     "DPLatentList": DPLatentList,
     "RayVAEDecodeDistributed": RayVAEDecodeDistributed,
+    "RayVAEDecodeAudio": RayVAEDecodeAudio,
     "RaySeedVR2VAEDecodeDistributed": RaySeedVR2VAEDecodeDistributed,
 }
 
@@ -1942,5 +1983,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "DPConditioningList": "Data Parallel Conditioning List",
     "DPLatentList": "Data Parallel Latent List",
     "RayVAEDecodeDistributed": "Distributed VAE (Ray)",
+    "RayVAEDecodeAudio": "VAE Decode Audio (Ray)",
     "RaySeedVR2VAEDecodeDistributed": "SeedVR2 VAE Decode Distributed (Ray)",
 }
