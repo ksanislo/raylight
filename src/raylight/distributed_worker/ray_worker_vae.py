@@ -130,6 +130,7 @@ def vae_decode_mode(vae):
     return "spatial"
 
 
+@torch.no_grad()
 def ray_vae_decode_native_impl(worker, samples):
     decode_progress.check_cancel(force=True)
     decode_progress.write("native", 0, 1)
@@ -142,6 +143,7 @@ def ray_vae_decode_native_impl(worker, samples):
     return images
 
 
+@torch.no_grad()
 def ray_vae_decode_temporal_partial_impl(worker, samples, job_rank=0, job_world_size=1):
     decode_progress.check_cancel(force=True)
     _validate_job_rank(job_rank, job_world_size)
@@ -261,6 +263,7 @@ def combine_temporal_vae_chunks(model, device, output_shape, chunks):
     return dec
 
 
+@torch.no_grad()
 def ray_vae_decode_temporal_combine_impl(worker, worker_partials):
     vae = worker.vae_model
     output_shape, chunks = _collect_temporal_chunks(worker_partials)
@@ -269,6 +272,7 @@ def ray_vae_decode_temporal_combine_impl(worker, worker_partials):
     return ray_vae_decode_finalize_impl(worker, decoded)
 
 
+@torch.no_grad()
 def ray_vae_decode_partial_impl(worker, samples, tile_size, overlap=64, temporal_size=64, temporal_overlap=8, job_rank=0, job_world_size=1):
     import comfy.model_management as model_management
 
@@ -685,6 +689,7 @@ def seedvr2_spatial_tile_ranges(height, width, tile_size, overlap):
     return ranges, overlap
 
 
+@torch.no_grad()
 def ray_seedvr2_vae_decode_partial_impl(worker, samples, tile_size, overlap=64, job_rank=0, job_world_size=1):
     import comfy.model_management as model_management
     from comfy.ldm.seedvr.vae import VideoAutoencoderKLWrapper
@@ -830,6 +835,7 @@ def combine_seedvr2_vae_partials(worker_partials):
     return decoded
 
 
+@torch.no_grad()
 def ray_vae_decode_finalize_impl(worker, decoded):
     decode_progress.check_cancel(force=True)
     decode_progress.write("finalize", 0, 1)
