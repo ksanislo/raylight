@@ -1669,6 +1669,18 @@ def make_ray_actor_fn(world_size, config):
     num_replicas = config.worker.parallel.data_parallel_degree
     shard_size = world_size // num_replicas
     use_group_process_group = config.worker.fsdp_enabled and num_replicas > 1
+    # With num_gpus=1 Ray picks the card and overwrites CUDA_VISIBLE_DEVICES, so rank
+    # order and PCI order need not agree. The collective groups are built from rank
+    # order, so on a multi socket box that decides whether an all-to-all stays on one
+    # node or crosses the interconnect. Claiming no GPU and naming the device instead
+    # makes rank i land on the i-th selected GPU.
+    gpu_pin_order = config.worker.selected_gpus if config.worker.pin_ranks_to_gpus else None
+
+    def _actor_options(rank, name):
+        if not gpu_pin_order:
+            return {"num_gpus": 1, "name": name}
+        return {"num_gpus": 0, "name": name,
+                "runtime_env": {"env_vars": {"CUDA_VISIBLE_DEVICES": str(gpu_pin_order[rank % len(gpu_pin_order)])}}}
 
     def _init_ray_actor():
         gpu_actor = ray.remote(RayWorker)
@@ -1687,7 +1699,7 @@ def make_ray_actor_fn(world_size, config):
 
         try:
             for local_rank, name, group_id in worker_specs:
-                gpu_actors.append(gpu_actor.options(num_gpus=1, name=name).remote(
+                gpu_actors.append(gpu_actor.options(**_actor_options(group_id * shard_size + local_rank, name)).remote(
                     local_rank=local_rank, device_id=0, config=config.worker, world_size=world_size, group_id=group_id))
             ray.get([actor.__ray_ready__.remote() for actor in gpu_actors], timeout=120)
             worker_processes = ray.get([
