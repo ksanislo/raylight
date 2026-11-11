@@ -1630,8 +1630,10 @@ class RayControlNetApply:
 class RayVAELoader:
     """Load a VAE model into all Ray workers.
 
-    Loads the VAE on each worker's GPU from disk.  Used by RayControlNetApply
-    when the ControlNet requires a VAE (e.g. for encoding the control image).
+    Loads the VAE on each worker's GPU from disk. Feeds the distributed decode,
+    and RayControlNetApply when the ControlNet requires a VAE (e.g. for encoding
+    the control image). The second output is the same VAE for nodes on the host,
+    loaded there on demand.
     """
 
     @classmethod
@@ -1643,8 +1645,13 @@ class RayVAELoader:
             }
         }
 
-    RETURN_TYPES = ("RAY_VAE",)
-    RETURN_NAMES = ("ray_vae",)
+    RETURN_TYPES = ("RAY_VAE", "VAE")
+    RETURN_NAMES = ("ray_vae", "vae")
+    OUTPUT_TOOLTIPS = (
+        "The VAE as loaded in the workers, for the distributed decode and Ray ControlNet.",
+        "The same VAE for nodes on the host, such as a keyframe encode. Loaded on the host on "
+        "demand; ComfyUI's RAM cache can trigger that, at the cost of a separate Load VAE.",
+    )
     FUNCTION = "load_vae"
     CATEGORY = "Raylight"
 
@@ -1654,7 +1661,45 @@ class RayVAELoader:
         gpu_actors = ray_actors["workers"]
         ray.get([actor.ray_vae_loader.remote(vae_path) for actor in gpu_actors])
 
-        return (vae_path,)
+        return (vae_path, _LazyHostVAE(vae_name))
+
+
+class _LazyHostVAE:
+    """A host VAE loaded on demand through the stock VAELoader.
+
+    The workers decode from their own copy, so the host only needs the VAE for
+    nodes that use it there, such as a keyframe encode. Any attribute read or
+    write loads it and goes to the loaded object, so it behaves as the VAE that
+    loader would have returned. ComfyUI's RAM cache inspects cached outputs, and
+    that can be what loads it; it then costs what a separate Load VAE would.
+    """
+
+    def __init__(self, vae_name, loader=None):
+        self._vae_name = vae_name
+        self._loader = loader
+        self._vae = None
+
+    def _load(self):
+        if self._vae is None:
+            loader = self._loader
+            if loader is None:
+                import nodes
+                loader = lambda name: nodes.VAELoader().load_vae(name)[0]
+            self._vae = loader(self._vae_name)
+        return self._vae
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._load(), name)
+
+    def __setattr__(self, name, value):
+        # nodes replace parts of a VAE in place (vae.patcher = ...); those must
+        # land on the loaded object the VAE's own methods read from
+        if name.startswith("_"):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._load(), name, value)
 
 
 class Noise_RandomNoise:
@@ -1760,7 +1805,7 @@ class RayVAEDecodeDistributed:
             "required": {
                 "ray_actors": ("RAY_ACTORS", {"tooltip": "Ray Actor to submit the model into"}),
                 "samples": ("LATENT", {"tooltip": "Latent samples to decode."}),
-                "vae_name": (folder_paths.get_filename_list("vae"), {"tooltip": "Name of the VAE model to use for decoding."}),
+                "ray_vae": ("RAY_VAE", {"tooltip": "The VAE from Load VAE (Ray)."}),
                 "tile_size": (
                     "INT",
                     {
@@ -1805,11 +1850,11 @@ class RayVAEDecodeDistributed:
 
     # -- Komikndr
     # By default VAE on comfy already "Parallelized" through tiling, so just distributed the tiling to other rank
-    def ray_decode(self, ray_actors, vae_name, samples, tile_size, overlap=64, temporal_size=64, temporal_overlap=8):
+    def ray_decode(self, ray_actors, samples, ray_vae, tile_size, overlap=64, temporal_size=64, temporal_overlap=8):
         gpu_actors = ray_actors["workers"]
         if not gpu_actors:
             raise ValueError("Distributed VAE (Ray) requires at least one Ray worker.")
-        vae_path = folder_paths.get_full_path_or_raise("vae", vae_name)
+        vae_path = ray_vae
 
         with _decode_session(ray_actors):
             for actor in gpu_actors:
