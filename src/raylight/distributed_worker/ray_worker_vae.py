@@ -1,3 +1,6 @@
+import contextlib
+import logging
+
 import torch
 
 import comfy.model_management as model_management
@@ -143,6 +146,187 @@ def ray_vae_decode_native_impl(worker, samples):
     return images
 
 
+
+#Workers run with a VRAM reserve sized for sampling, where it keeps the diffusion
+#model's shards from being pulled onto the card. It applies to a decode as well,
+#and there it does the same thing to the VAE: comfy's ops fault each weight in
+#over the bus and release it again, so the card holds a fraction of the model and
+#streams the rest for the decode's whole length. Dropping the reserve while the
+#decode runs lets the weights stay where they are, and a weight already resident
+#costs nothing to fault.
+_DECODE_VRAM_RESERVE = 0
+
+#The activation figure below is an estimate, and on a card the VAE would nearly
+#fill there is nothing to absorb one that reads low - so the cushion is sized to
+#decline those rather than to fit them.
+_DECODE_VRAM_CUSHION = 2 * 1024 * 1024 * 1024
+
+
+@contextlib.contextmanager
+def _decode_vram_reserve(vae, memory_used):
+    """Drop the worker's VRAM reserve for the decode where the card can spare it.
+
+    What matters is how much of the card is free when the decode starts, not why,
+    so the room is measured rather than inferred from the configuration, and a card
+    that does not have it keeps its reserve and streams exactly as it always has.
+    """
+    try:
+        import comfy_aimdo.control as aimdo_control
+        previous = aimdo_control.get_simple_vram_headroom()
+        required = vae.patcher.model_size() + memory_used + _DECODE_VRAM_CUSHION
+        free = model_management.get_free_memory(vae.device)
+    except Exception as exc:
+        logging.warning("[Raylight] could not size the decode, keeping the VRAM reserve: %s", exc)
+        yield
+        return
+
+    if free < required:
+        logging.info(
+            "[Raylight] decode keeps the VRAM reserve: %.1f GiB free, %.1f GiB needed to hold the VAE",
+            free / 1073741824, required / 1073741824)
+        yield
+        return
+
+    try:
+        aimdo_control.set_simple_vram_headroom(_DECODE_VRAM_RESERVE)
+        yield
+    finally:
+        #a worker left without its reserve samples without one next time
+        try:
+            aimdo_control.set_simple_vram_headroom(previous)
+        except Exception as exc:
+            logging.error("[Raylight] could not restore the VRAM reserve after decode: %s", exc)
+
+
+def splits_by_rows(model, latent_t, job_world_size):
+    """Whether a decode is spread over the ranks by rows of tiles instead of by time.
+
+    A clip shorter than one chunk per rank leaves ranks idle, and a still is a
+    single chunk. Each chunk is decoded as rows of spatial tiles that do not depend
+    on one another, so those rows are what gets spread over the ranks instead. Only
+    the stock video decoder, which tiles, decodes this way.
+    """
+    if job_world_size < 2 or not isinstance(model, MiniMaxH3VideoVAE) or model.noncausal:
+        return False
+    if type(model).decode is not MiniMaxH3VideoVAE.decode or model.still_frame is not None:
+        return False
+    if not getattr(model, "tiling", False):
+        return False
+    if latent_t == 1:
+        return True
+    return model._decode_temporal_chunks(latent_t)[1] < job_world_size
+
+
+def _row_plan(model, z_len):
+    """The decoder calls a decode of z_len latents makes, as (start, end, frames) per
+    chunk, mirroring MiniMaxH3VideoVAE.decode: a still is decoded as a full chunk of
+    copies keeping only its first real frame."""
+    if z_len == 1:
+        first = model.frame_pre_padding
+        return 0, [(0, model.tokens_chunk_size, slice(first, first + 1))]
+    pad_tokens, num_chunks = model._decode_temporal_chunks(z_len)
+    chunks = []
+    for i in range(num_chunks):
+        start = i * model.tokens_chunk_size
+        chunks.append((start, start + model.tokens_chunk_size + model.token_overlap, slice(None)))
+    return pad_tokens, chunks
+
+
+def _decode_rows_partial(vae, latent, job_rank, job_world_size):
+    model = vae.first_stage_model
+    z = latent.to(device=vae.device, dtype=vae.vae_dtype)
+    mean = model.latents_mean.view(1, -1, 1, 1, 1).to(z)
+    std = model.latents_std.view(1, -1, 1, 1, 1).to(z)
+    z = z * std + mean
+    z_len = z.shape[2]
+    pad_tokens, chunks = _row_plan(model, z_len)
+    if z_len == 1:
+        z = z.repeat(1, 1, model.tokens_chunk_size, 1, 1)
+    elif pad_tokens > 0:
+        z = torch.cat([z, z[:, :, -1:].repeat(1, 1, pad_tokens, 1, 1)], dim=2)
+
+    height, width = z.shape[-2] * model.vae_ratio, z.shape[-1] * model.vae_ratio
+    y_idx, y_len, _ = model.split_tiles(height)
+    x_idx, x_len, _ = model.split_tiles(width)
+    work = [(c, i) for c in range(len(chunks)) for i in range(len(y_idx))]
+    assigned = work[job_rank::job_world_size]
+    part = f"rank{job_rank}"
+    decode_progress.write(part, 0, len(assigned))
+
+    rows = []
+    for chunk_index, row_index in assigned:
+        decode_progress.check_cancel()
+        start, end, frames = chunks[chunk_index]
+        zi, zl = y_idx[row_index] // model.vae_ratio, y_len[row_index] // model.vae_ratio
+        z_row = z[:, :, start:end, zi:zi + zl, :]
+        #only the frames the decode keeps cross to the combining worker
+        tiles = [tile[:, :, frames].to(device="cpu", copy=True)
+                 for tile in model._decode_tile_row(z_row, x_idx, x_len)]
+        rows.append((chunk_index, row_index, tiles))
+        decode_progress.write(part, len(rows), len(assigned))
+
+    return {
+        "mode": "rows",
+        "z_shape": tuple(z.shape),
+        "latent_t": z_len,
+        "num_chunks": len(chunks),
+        "num_rows": len(y_idx),
+        "output_shape": tuple(model.decode_output_shape(latent.shape)),
+        "rows": rows,
+    }
+
+
+def _collect_row_tiles(worker_partials):
+    first = worker_partials[0]
+    plan = (first["num_chunks"], first["num_rows"], first["z_shape"])
+    collected = {}
+    for i, worker_result in enumerate(worker_partials):
+        if not isinstance(worker_result, dict) or worker_result.get("mode") != "rows":
+            raise ValueError(f"Distributed VAE decode worker {i} did not return a row partial.")
+        if (worker_result["num_chunks"], worker_result["num_rows"], worker_result["z_shape"]) != plan:
+            raise ValueError("Distributed VAE decode workers returned inconsistent row plans.")
+        for chunk_index, row_index, tiles in worker_result["rows"]:
+            if (chunk_index, row_index) in collected:
+                raise ValueError(f"Distributed VAE decode received duplicate row {row_index} of chunk {chunk_index}.")
+            collected[(chunk_index, row_index)] = tiles
+    missing = [key for key in ((c, i) for c in range(plan[0]) for i in range(plan[1])) if key not in collected]
+    if missing:
+        raise ValueError(f"Distributed VAE decode is missing (chunk, row) tiles {missing}.")
+    return first, collected
+
+
+def _assemble_chunk(model, device, clip_shape, row_tiles):
+    #tiled_decode does the blending; it is handed the decoded rows in order in place
+    #of decoding them, so the stitch is the model's own and cannot drift from it
+    rows = iter(row_tiles)
+
+    def replay(z_row, x_idx, x_len):
+        for tile in next(rows):
+            yield tile.to(device)
+
+    model._decode_tile_row = replay
+    try:
+        return model.tiled_decode(torch.empty(clip_shape, device="meta"))
+    finally:
+        del model._decode_tile_row
+
+
+@torch.no_grad()
+def combine_row_vae_tiles(model, device, worker_partials):
+    first, collected = _collect_row_tiles(worker_partials)
+    z_shape = first["z_shape"]
+    _, chunks = _row_plan(model, first["latent_t"])
+    decoded = []
+    for chunk_index, (start, end, _frames) in enumerate(chunks):
+        clip_shape = (*z_shape[:2], len(range(z_shape[2])[start:end]), *z_shape[3:])
+        row_tiles = [collected.pop((chunk_index, i)) for i in range(first["num_rows"])]
+        decoded.append(_assemble_chunk(model, device, clip_shape, row_tiles).to(device="cpu"))
+        del row_tiles
+    if first["latent_t"] == 1:
+        return model._finalize_pixels(decoded[0].to(device)).cpu()
+    return combine_temporal_vae_chunks(model, device, tuple(first["output_shape"]), decoded)
+
+
 @torch.no_grad()
 def ray_vae_decode_temporal_partial_impl(worker, samples, job_rank=0, job_world_size=1):
     decode_progress.check_cancel(force=True)
@@ -155,6 +339,12 @@ def ray_vae_decode_temporal_partial_impl(worker, samples, job_rank=0, job_world_
     latent = samples["samples"]
     if _is_nested_tensor(latent) or latent.ndim != 5:
         raise ValueError("Distributed temporal decode requires a 5D video latent.")
+    if splits_by_rows(model, latent.shape[2], job_world_size):
+        memory_used = vae.memory_used_decode(latent.shape, vae.vae_dtype)
+        with _decode_vram_reserve(vae, memory_used):
+            model_management.load_models_gpu([vae.patcher], memory_required=memory_used, force_full_load=vae.disable_offload)
+            with model_management.cuda_device_context(vae.device):
+                return _decode_rows_partial(vae, latent, job_rank, job_world_size)
     if latent.shape[2] == 1:
         raise ValueError("H3 still latents require native VAE decoding.")
 
@@ -166,9 +356,8 @@ def ray_vae_decode_temporal_partial_impl(worker, samples, job_rank=0, job_world_
     decode_progress.write(part, 0, len(chunk_indices))
     if chunk_indices:
         memory_used = vae.memory_used_decode(latent.shape, vae.vae_dtype)
-        model_management.load_models_gpu([vae.patcher], memory_required=memory_used, force_full_load=vae.disable_offload)
-
-        with model_management.cuda_device_context(vae.device):
+        with _decode_vram_reserve(vae, memory_used), model_management.cuda_device_context(vae.device):
+            model_management.load_models_gpu([vae.patcher], memory_required=memory_used, force_full_load=vae.disable_offload)
             for chunk_index in chunk_indices:
                 decode_progress.check_cancel()
                 start = chunk_index * model.tokens_chunk_size
@@ -266,6 +455,10 @@ def combine_temporal_vae_chunks(model, device, output_shape, chunks):
 @torch.no_grad()
 def ray_vae_decode_temporal_combine_impl(worker, worker_partials):
     vae = worker.vae_model
+    if worker_partials and isinstance(worker_partials[0], dict) and worker_partials[0].get("mode") == "rows":
+        with model_management.cuda_device_context(vae.device):
+            decoded = combine_row_vae_tiles(vae.first_stage_model, vae.device, worker_partials)
+        return ray_vae_decode_finalize_impl(worker, decoded)
     output_shape, chunks = _collect_temporal_chunks(worker_partials)
     with model_management.cuda_device_context(vae.device):
         decoded = combine_temporal_vae_chunks(vae.first_stage_model, vae.device, output_shape, chunks)
