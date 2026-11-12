@@ -15,6 +15,8 @@ import torch
 import torch.distributed as dist
 from torch.distributed.fsdp import FSDPModule
 import ray
+from ray.util.placement_group import placement_group, remove_placement_group
+from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 import comfy.patcher_extension as pe
 from comfy import model_base, model_management
@@ -1665,22 +1667,60 @@ def ray_nccl_tester(world_size, collective_timeout_minutes=1.0):
         actor.kill.remote()
 
 
+_PINNED_GROUP = None
+
+
+def _visible_gpu():
+    return os.environ.get("CUDA_VISIBLE_DEVICES", "")
+
+
 def make_ray_actor_fn(world_size, config):
     num_replicas = config.worker.parallel.data_parallel_degree
     shard_size = world_size // num_replicas
     use_group_process_group = config.worker.fsdp_enabled and num_replicas > 1
-    # With num_gpus=1 Ray picks the card and overwrites CUDA_VISIBLE_DEVICES, so rank
-    # order and PCI order need not agree. The collective groups are built from rank
-    # order, so on a multi socket box that decides whether an all-to-all stays on one
-    # node or crosses the interconnect. Claiming no GPU and naming the device instead
-    # makes rank i land on the i-th selected GPU.
+    # Ray picks the card each actor's GPU comes from, so rank order and PCI order
+    # need not agree. The collective groups are built from rank order, so on a multi
+    # socket box that decides whether an all-to-all stays on one node or crosses the
+    # interconnect. Pinning reserves one GPU per rank in a placement group, finds the
+    # card each bundle holds, and starts rank i in the bundle holding the i-th GPU of
+    # GPU_SELECT: Ray still accounts for every GPU it hands out.
     gpu_pin_order = config.worker.selected_gpus if config.worker.pin_ranks_to_gpus else None
 
-    def _actor_options(rank, name):
-        if not gpu_pin_order:
+    def _rank_bundles():
+        global _PINNED_GROUP
+        if _PINNED_GROUP is not None:
+            # The previous workers are gone; release what they held. After a cluster
+            # restart the handle belongs to the old cluster and there is nothing to do.
+            try:
+                remove_placement_group(_PINNED_GROUP)
+            except Exception:
+                pass
+            _PINNED_GROUP = None
+        group = placement_group([{"CPU": 1, "GPU": 1}] * world_size, strategy="STRICT_PACK")
+        try:
+            ray.get(group.ready(), timeout=120)
+            probe = ray.remote(num_gpus=1, num_cpus=1)(_visible_gpu)
+            held = ray.get([
+                probe.options(scheduling_strategy=PlacementGroupSchedulingStrategy(
+                    group, placement_group_bundle_index=index)).remote()
+                for index in range(world_size)
+            ], timeout=60)
+            by_gpu = {gpu: index for index, gpu in enumerate(held)}
+            wanted = [str(gpu) for gpu in gpu_pin_order[:world_size]]
+            if sorted(by_gpu) != sorted(wanted):
+                raise RuntimeError("pin_ranks_to_gpus: Ray reserved GPUs {} for GPU_SELECT {}".format(
+                    sorted(by_gpu), wanted))
+        except Exception:
+            remove_placement_group(group)
+            raise
+        _PINNED_GROUP = group
+        return [PlacementGroupSchedulingStrategy(group, placement_group_bundle_index=by_gpu[gpu])
+                for gpu in wanted]
+
+    def _actor_options(rank, name, rank_bundles):
+        if rank_bundles is None:
             return {"num_gpus": 1, "name": name}
-        return {"num_gpus": 0, "name": name,
-                "runtime_env": {"env_vars": {"CUDA_VISIBLE_DEVICES": str(gpu_pin_order[rank % len(gpu_pin_order)])}}}
+        return {"num_gpus": 1, "num_cpus": 1, "name": name, "scheduling_strategy": rank_bundles[rank]}
 
     def _init_ray_actor():
         gpu_actor = ray.remote(RayWorker)
@@ -1697,9 +1737,11 @@ def make_ray_actor_fn(world_size, config):
                 for local_rank in range(shard_size):
                     worker_specs.append((local_rank, f"RayWorker:{group_id}_{local_rank}", group_id))
 
+        rank_bundles = _rank_bundles() if gpu_pin_order else None
         try:
             for local_rank, name, group_id in worker_specs:
-                gpu_actors.append(gpu_actor.options(**_actor_options(group_id * shard_size + local_rank, name)).remote(
+                options = _actor_options(group_id * shard_size + local_rank, name, rank_bundles)
+                gpu_actors.append(gpu_actor.options(**options).remote(
                     local_rank=local_rank, device_id=0, config=config.worker, world_size=world_size, group_id=group_id))
             ray.get([actor.__ray_ready__.remote() for actor in gpu_actors], timeout=120)
             worker_processes = ray.get([

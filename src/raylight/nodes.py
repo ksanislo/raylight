@@ -612,6 +612,13 @@ class RayInitializer:
                 data_parallel_degree=effective_dp_degree,
             )
 
+        if pin_ranks_to_gpus:
+            if not selected_gpus:
+                raise ValueError("pin_ranks_to_gpus needs GPU_SELECT to list the GPUs to use, e.g. 0,1,2,3")
+            # Ray's GPU pool is GPU_SELECT, and every card in it holds a rank.
+            selected_gpus = selected_gpus[:world_size]
+            logging.info("[Raylight] pinning rank i -> GPU %s", list(selected_gpus))
+
         worker_config = RayWorkerConfig(
             parallel=parallel, attention_backend=XFuser_attention,
             sync_ulysses=sync_ulysses, fsdp_enabled=FSDP, fsdp_cpu_offload=FSDP_CPU_OFFLOAD,
@@ -625,12 +632,6 @@ class RayInitializer:
             numa_bind=numa_bind,
             pin_ranks_to_gpus=pin_ranks_to_gpus,
         )
-        if pin_ranks_to_gpus:
-            if not selected_gpus:
-                raise ValueError("pin_ranks_to_gpus needs GPU_SELECT to list the GPUs to use, e.g. 0,1,2,3")
-            if len(selected_gpus) < world_size:
-                raise ValueError(f"pin_ranks_to_gpus needs at least {world_size} GPU indices, got {len(selected_gpus)}")
-            logging.info("[Raylight] pinning rank i -> GPU %s", list(selected_gpus[:world_size]))
         config = RaylightConfig(loading=LoadingOptions(parallel_quant_load=parallel_quant_load), worker=worker_config)
         if worker_config.attention_backend == "COMFY_KITCHEN_INT8" and worker_config.parallel.ring_degree != 1:
             raise ValueError("Comfy Kitchen INT8 requires ring_degree=1.")
