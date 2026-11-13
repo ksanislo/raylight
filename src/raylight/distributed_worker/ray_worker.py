@@ -46,6 +46,7 @@ from raylight.distributed_worker.ray_worker_vae import (
 )
 from raylight.distributed_worker.utils import Noise_EmptyNoise, Noise_RandomNoise, patch_ray_tqdm
 from raylight.comfy_dist.quant_ops import patch_temp_fix_ck_ops
+from raylight.comfy_dist.weight_adapter.lora import release_bypass_operands, set_bypass_operand_placement
 from raylight.numa import bind_to_gpu_node
 from raylight import decode_progress
 from ray.exceptions import RayActorError
@@ -691,6 +692,7 @@ class RayWorker:
         if self.model is None:
             return
 
+        release_bypass_operands()
         if hasattr(self.model, "free_fsdp_vram"):
             try:
                 self.model.free_fsdp_vram()
@@ -744,6 +746,8 @@ class RayWorker:
         except Exception as e:
             print(f"[Rank {self.local_rank}] unload_all_models failed in clear_sampling_vram: {e}")
         model_management.reset_cast_buffers()
+        # resident LoRA bypass operands are cast again on the next forward
+        release_bypass_operands()
 
         if self.model is not None and hasattr(self.model, "offload_fsdp_vram"):
             try:
@@ -1165,6 +1169,7 @@ class RayWorker:
         import comfy.sd as comfy_sd
         import comfy.utils as comfy_utils
 
+        set_bypass_operand_placement(self.config.lora_bypass_operands)
         for lora in self.lora_list:
             lora_path = lora["path"]
             strength_model = lora["strength_model"]

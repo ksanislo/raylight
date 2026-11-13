@@ -61,6 +61,7 @@ class RayWorkerConfig:
     clear_vram_after_sampling: bool = False
     selected_gpus: tuple[int, ...] | None = None
     numa_bind: bool = False
+    lora_bypass_operands: str = "host"
 
     def as_parallel_dict(self, world_size, group_id=0, is_quant=False):
         grouped = self.fsdp_enabled and self.parallel.data_parallel_degree > 1

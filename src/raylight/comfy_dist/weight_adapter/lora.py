@@ -1,4 +1,5 @@
 import logging
+import weakref
 from typing import Optional
 
 import torch
@@ -14,14 +15,68 @@ from .base import (
 )
 
 
+# Where the LoRA bypass keeps its up/down operands between forwards:
+#   host      cast from the host copy on every forward (the default)
+#   pinned    page lock the host copy, so the cast to the device is asynchronous
+#   resident  keep the cast operands on the device, trading VRAM for the copies
+BYPASS_OPERAND_PLACEMENTS = ("host", "pinned", "resident")
+_placement = "host"
+_resident = weakref.WeakSet()
+
+
+def set_bypass_operand_placement(placement):
+    """Choose where bypass operands are kept; a change drops the resident copies."""
+    global _placement
+    if placement not in BYPASS_OPERAND_PLACEMENTS:
+        raise ValueError("LoRA bypass operand placement must be one of {}, got {!r}".format(
+            BYPASS_OPERAND_PLACEMENTS, placement))
+    if placement != _placement:
+        release_bypass_operands()
+        _placement = placement
+
+
+def release_bypass_operands():
+    """Drop the resident operand copies so their VRAM goes back to the allocator."""
+    for adapter in list(_resident):
+        adapter._bypass_cache = None
+    _resident.clear()
+
+
 def _bypass_operands(adapter, up, down, device, dtype):
     """Get the bypass operands onto the compute device.
 
     A chunked bypass forward holds them for its slices, so the slices share one cast.
+    Otherwise the operands are placed as set_bypass_operand_placement chose: they do
+    not change between steps, but a host copy is cast again on every forward, once per
+    patched module, and an unpinned host buffer cannot be copied asynchronously.
     """
     held = getattr(adapter, "_bypass_held", None)
     if held is not None and held[0] == (device, dtype):
         return held[1], held[2]
+
+    if _placement == "resident":
+        cache = getattr(adapter, "_bypass_cache", None)
+        # keyed on the source tensors too, so new weights are cast again
+        if cache is None or cache[0] != (device, dtype) or cache[1] is not up or cache[2] is not down:
+            cache = ((device, dtype), up, down,
+                     comfy.model_management.cast_to_device(up, device, dtype),
+                     comfy.model_management.cast_to_device(down, device, dtype))
+            adapter._bypass_cache = cache
+            _resident.add(adapter)
+        return cache[3], cache[4]
+
+    if _placement == "pinned" and not getattr(adapter, "_bypass_pinned", False):
+        try:
+            weights = list(adapter.weights)
+            for i in (0, 1):
+                if weights[i].device.type == "cpu" and not weights[i].is_pinned():
+                    weights[i] = weights[i].pin_memory()
+            adapter.weights = tuple(weights)
+            up, down = weights[0], weights[1]
+        except Exception as e:
+            logging.warning("[Raylight] could not page lock LoRA bypass operands: %s", e)
+        adapter._bypass_pinned = True
+
     return (
         comfy.model_management.cast_to_device(up, device, dtype),
         comfy.model_management.cast_to_device(down, device, dtype),
