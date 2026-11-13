@@ -37,9 +37,9 @@ into main
 # PARALLEL_QUANT_LOAD, PG_TIMEOUT_MINUTES, WORKER_PIN, LORA_BYPASS) are not read.
 # Out of the build for other reasons:
 #   feat/initializer-input-ux - regrouped the old input order; upstream fixed a new one.
-#   feat/fsdp-vae-decode, feat/single-vae-loader, feat/ray-audio-decode,
+#   feat/fsdp-vae-decode, feat/single-vae-loader, the pre-v1.11 feat/ray-audio-decode,
 #   feat/vae-decode-row-split - their content is ported, minus the decoder sharding (off
-#   in every workflow, no speedup), onto feat/decode-extras-on-native-temporal.
+#   in every workflow, no speedup), onto the four decode branches below.
 #
 # Old tips of every branch rebuilt here are tagged pre-v111/<branch>.
 
@@ -58,13 +58,21 @@ branch fix/ray-method-under-wrapper           onto base
 # divide by the SP world size - nearly always - so ring and ck INT8 never ran
 # (sampler 245 s vs 117 s) and every rank held the clip's whole K/V.
 branch fix/minimax-usp-uneven-sequence-stays-distributed onto base
-# On upstream's temporal decode: the VAE kept resident where the card can spare it,
-# short clips and stills split across ranks by rows of tiles, Load VAE (Ray)'s host
-# VAE output, VAE Decode Audio (Ray).
-branch feat/decode-extras-on-native-temporal  onto fix/vae-decode-no-grad
-# LoRA bypass deltas added in place, 8192 rows at a time (a 30 s 768p clip needs it),
-# and the opt-in operand placement, which upstream's config no longer exposes.
-branch feat/lora-bypass-memory                onto base
+# On upstream's temporal decode, split for separate review (they were one branch,
+# feat/decode-extras-on-native-temporal, until 2026-11-13):
+# the VAE kept on the card for the decode where it can spare the room,
+branch feat/decode-resident-vae               onto fix/vae-decode-no-grad
+# short clips and stills split across ranks by rows of tiles (uses the reserve drop),
+branch feat/decode-row-split                  onto feat/decode-resident-vae
+# Load VAE (Ray)'s host VAE output; the decode takes its VAE from that loader,
+branch feat/ray-vae-loader-host-vae           onto fix/vae-decode-no-grad
+# VAE Decode Audio (Ray).
+branch feat/ray-audio-decode                  onto fix/vae-decode-no-grad
+# LoRA bypass deltas added in place, 8192 rows at a time (a 30 s 768p clip needs it).
+branch feat/lora-bypass-in-place              onto base
+# Where the bypass keeps its operands (host/pinned/resident), typed config and an
+# initializer input appended after pin_ranks_to_gpus, so it assembles after pinning.
+branch feat/lora-bypass-operand-placement     onto feat/lora-bypass-in-place
 # The 32B prompt encoder sharded across the workers (RayCLIPLoader), its offload while
 # sampling, cancel and progress.
 branch feat/fsdp-text-encoder                 onto base
@@ -76,4 +84,4 @@ branch fix/offload-dit-while-encoding         onto feat/fsdp-text-encoder
 branch feat/rank-gpu-pinning                  onto base
 branch tooling/stack                          onto base
 
-assemble tooling/stack fix/ray-method-under-wrapper fix/minimax-usp-uneven-sequence-stays-distributed feat/ck-int8-attention fix/vae-decode-no-grad feat/lora-bypass-memory feat/fsdp-text-encoder fix/worker-reset-cast-buffers fix/offload-dit-while-encoding feat/decode-extras-on-native-temporal feat/rank-gpu-pinning
+assemble tooling/stack fix/ray-method-under-wrapper fix/minimax-usp-uneven-sequence-stays-distributed feat/ck-int8-attention fix/vae-decode-no-grad feat/lora-bypass-in-place feat/fsdp-text-encoder fix/worker-reset-cast-buffers fix/offload-dit-while-encoding feat/decode-resident-vae feat/decode-row-split feat/ray-vae-loader-host-vae feat/ray-audio-decode feat/rank-gpu-pinning feat/lora-bypass-operand-placement
